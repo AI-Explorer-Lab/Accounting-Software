@@ -1,0 +1,26 @@
+{
+  "name": "accounting-software-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "type-check": "vue-tsc -b"
+  },
+  "dependencies": {
+    "vue": "^3.5.39"
+  },
+  "devDependencies": {
+    "@vue/test-utils": "^2.4.6",
+    "@types/node": "^26.1.1",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "jsdom": "^26.1.0",
+    "typescript": "~5.9.3",
+    "vite": "^8.1.4",
+    "vitest": "^3.2.4",
+    "vue-tsc": "^3.3.7"
+  }
+}

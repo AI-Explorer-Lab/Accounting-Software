@@ -1,0 +1,29 @@
+default:
+  environment:
+    name: development
+    debug: false
+    create_tables: false
+  db:
+    host: 127.0.0.1
+    port: 5433
+    name: account
+    user: account
+    password: account
+    echo: false
+
+development:
+  environment:
+    name: development
+    debug: true
+    create_tables: true
+
+test:
+  environment:
+    name: test
+    debug: false
+    create_tables: true
+
+production:
+  environment:
+    name: production
+    debug: false
