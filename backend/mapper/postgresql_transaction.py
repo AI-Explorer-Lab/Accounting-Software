@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import CheckConstraint, Date, Enum as SqlEnum, Numeric, String, Text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -53,3 +54,51 @@ async def create(
     await session.flush()
     await session.refresh(transaction)
     return transaction
+
+
+async def list_records(
+    session: AsyncSession,
+    *,
+    page: int,
+    page_size: int,
+    transaction_type: TransactionType | None = None,
+    category: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> tuple[list[TransactionEntity], int]:
+    filters = []
+    if transaction_type is not None:
+        filters.append(TransactionEntity.transaction_type == transaction_type)
+    if category:
+        filters.append(TransactionEntity.category.ilike(f"%{category}%"))
+    if start_date is not None:
+        filters.append(TransactionEntity.transaction_date >= start_date)
+    if end_date is not None:
+        filters.append(TransactionEntity.transaction_date <= end_date)
+
+    total_result = await session.execute(
+        select(func.count()).select_from(TransactionEntity).where(*filters)
+    )
+    total = int(total_result.scalar_one())
+
+    records_result = await session.execute(
+        select(TransactionEntity)
+        .where(*filters)
+        .order_by(TransactionEntity.transaction_date.desc(), TransactionEntity.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return list(records_result.scalars().all()), total
+
+
+async def delete_by_id(session: AsyncSession, transaction_id: int) -> bool:
+    result = await session.execute(
+        select(TransactionEntity).where(TransactionEntity.id == transaction_id)
+    )
+    transaction = result.scalar_one_or_none()
+    if transaction is None:
+        return False
+
+    await session.delete(transaction)
+    await session.flush()
+    return True

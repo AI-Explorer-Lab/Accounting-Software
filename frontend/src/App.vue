@@ -8,7 +8,8 @@
       </p>
     </header>
 
-    <TransactionForm />
+    <TransactionForm @created="refreshTransactions" />
+    <TransactionList :refresh-key="transactionRefreshKey" />
     <HealthCard />
 
     <section class="architecture" aria-labelledby="architecture-title">
@@ -26,6 +27,15 @@
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
+
 import HealthCard from './components/HealthCard.vue'
 import TransactionForm from './components/TransactionForm.vue'
+import TransactionList from './components/TransactionList.vue'
+
+const transactionRefreshKey = ref(0)
+
+function refreshTransactions() {
+  transactionRefreshKey.value += 1
+}
 </script>

@@ -34,3 +34,10 @@ class TransactionCreateRequest(BaseModel):
             return None
         description = value.strip()
         return description or None
+
+
+class TransactionListRequest(PaginationRequest):
+    transaction_type: TransactionType | None = None
+    category: str | None = Field(default=None, max_length=100)
+    start_date: date | None = None
+    end_date: date | None = None
