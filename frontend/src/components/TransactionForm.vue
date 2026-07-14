@@ -8,20 +8,21 @@ import {
 const initialDate = () => new Date().toISOString().slice(0, 10)
 
 const transactionType = ref<TransactionType>('expense')
-const amount = ref('')
+const amount = ref<string | number>('')
 const category = ref('')
 const description = ref('')
 const transactionDate = ref(initialDate())
 const submitting = ref(false)
 const successMessage = ref('')
 const errorMessage = ref('')
+const normalizedAmount = computed(() => String(amount.value).trim())
 
 const amountIsValid = computed(() => {
-  if (!amount.value.trim()) {
+  if (!normalizedAmount.value) {
     return false
   }
 
-  const numericAmount = Number(amount.value)
+  const numericAmount = Number(normalizedAmount.value)
   return Number.isFinite(numericAmount) && numericAmount > 0
 })
 
@@ -43,7 +44,7 @@ async function submitTransaction() {
 
   try {
     await createTransaction({
-      amount: amount.value,
+      amount: normalizedAmount.value,
       category: category.value.trim(),
       description: description.value.trim() || null,
       transaction_date: transactionDate.value,

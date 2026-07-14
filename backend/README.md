@@ -1,7 +1,7 @@
 # Accounting Software Backend
 
-FastAPI architecture scaffold backed by PostgreSQL. It intentionally contains no
-accounting business implementation yet.
+FastAPI accounting API backed by PostgreSQL. It currently supports creating
+income and expense transactions.
 
 ## Start locally
 
@@ -23,6 +23,24 @@ conda env update -n account -f backend/environment.yml --prune
 
 The API documentation is available at `http://127.0.0.1:8000/docs`. The health
 endpoint is `http://127.0.0.1:8000/api/v1/health`.
+
+## Create a transaction
+
+`POST /api/transactions` accepts both income and expense transactions:
+
+```json
+{
+  "amount": "125.50",
+  "category": "Food",
+  "description": "Team lunch",
+  "transaction_date": "2026-07-14",
+  "transaction_type": "expense"
+}
+```
+
+`amount` must be greater than zero. `transaction_type` must be `income` or
+`expense`. Development startup automatically creates the `transactions` table
+when the configured PostgreSQL database is available.
 
 ## Configuration
 
