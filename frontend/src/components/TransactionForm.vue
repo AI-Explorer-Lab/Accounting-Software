@@ -9,6 +9,17 @@ const emit = defineEmits<{
   created: []
 }>()
 
+const categoryOptions = [
+  '餐饮',
+  '交通',
+  '购物',
+  '居住',
+  '娱乐',
+  '医疗',
+  '工资',
+  '其他',
+] as const
+
 const initialDate = () => new Date().toISOString().slice(0, 10)
 
 const transactionType = ref<TransactionType>('expense')
@@ -103,14 +114,12 @@ async function submitTransaction() {
 
       <label>
         <span>分类</span>
-        <input
-          v-model="category"
-          name="category"
-          type="text"
-          maxlength="100"
-          placeholder="例如：餐饮、工资"
-          required
-        />
+        <select v-model="category" name="category" required>
+          <option value="" disabled>请选择分类</option>
+          <option v-for="option in categoryOptions" :key="option" :value="option">
+            {{ option }}
+          </option>
+        </select>
       </label>
 
       <label>

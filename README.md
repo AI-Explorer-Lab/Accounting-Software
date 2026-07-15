@@ -33,3 +33,117 @@ conda run -n account pytest -q backend/tests
 npm --prefix frontend test
 npm --prefix frontend run build
 ```
+
+## Run the Codex orchestrator
+
+The orchestrator handles one feature request at a time. It asks Codex to make
+the change, discovers tests added or modified for that request, runs those
+tests first, and then runs the three full-project checks above. It reuses the
+same Codex thread for repairs and stops for manual review after three failed
+validation rounds.
+
+Use the existing `account` Conda environment and install the orchestrator's
+separate, pinned Python SDK and project-local Codex runtime:
+
+```bash
+conda activate account
+python -m pip install -r orchestrator/requirements.txt
+npm ci --prefix orchestrator
+```
+
+Start interactively and enter only the requirement and acceptance criteria:
+
+```bash
+python -m orchestrator.codex_loop start
+```
+
+For a non-interactive caller, pass the same information as arguments or in a
+JSON file shaped like `orchestrator/task.example.json`:
+
+```bash
+python -m orchestrator.codex_loop start \
+  --requirement "交易列表支持按最低金额筛选" \
+  --acceptance-criterion "传入 min_amount=100 时，只返回金额大于或等于 100 的交易"
+
+python -m orchestrator.codex_loop start \
+  --task-file orchestrator/task.example.json
+```
+
+If a process was interrupted, resume the saved task and Codex thread instead
+of starting another one:
+
+```bash
+python -m orchestrator.codex_loop resume --task-id <task-id>
+```
+
+Runtime state, redacted command logs, `result.json`, and `report.md` are stored
+under `.codex-orchestrator/runs/<task-id>/`. This directory is local-only and
+ignored by Git. The orchestrator does not commit, reset, clean, or roll back
+the working tree.
+
+## Run the Codex orchestrator web interface
+
+The web interface adds a local Vue page and FastAPI API around the same
+orchestration workflow. It still handles only one active task at a time and
+continues to use `.codex-orchestrator/` as its only task store.
+
+Install every Python dependency into the existing `account` Conda environment.
+Do not create a repository-local virtual environment:
+
+```bash
+conda activate account
+python -m pip install -r orchestrator/requirements.txt
+python -m pip install -r orchestrator/backend/requirements.txt
+npm ci --prefix orchestrator
+npm ci --prefix orchestrator/frontend
+```
+
+Start both services from the repository root. The script uses Python from the
+`account` environment and stops both processes together when you press
+`Ctrl+C`:
+
+```bash
+./orchestrator/start.sh
+```
+
+To run the services separately, start the API from the repository root:
+
+```bash
+conda run -n account uvicorn orchestrator.backend.main:app \
+  --reload --host 127.0.0.1 --port 8100
+```
+
+Then start the page in another terminal:
+
+```bash
+npm --prefix orchestrator/frontend run dev
+```
+
+Open `http://127.0.0.1:5100`. The page submits a requirement and one or more
+acceptance criteria, polls the task every two seconds, and displays validation
+rounds and the final report. The API listens only on `127.0.0.1:8100` by
+default and reuses the Codex login on this computer.
+
+If the API process was interrupted while a task was running, restart it and
+resume the saved task and thread:
+
+```bash
+curl -X POST http://127.0.0.1:8100/api/tasks/<task-id>/resume
+```
+
+The browser remembers the most recent task ID and will continue querying it
+after a refresh. See `orchestrator/backend/README.md` and
+`orchestrator/frontend/README.md` for API and test commands.
+
+### Pinned Codex runtime
+
+`openai-codex==0.1.0b3` bundles Codex runtime `0.137.0a4`, which is too old for
+the current default model. The orchestrator therefore uses the SDK's supported
+`codex_bin` setting to select the project-local official
+`@openai/codex@0.144.4` runtime. It checks that exact version before starting
+App Server and never falls back to an unrelated global `codex` executable.
+
+If the runtime is missing or has the wrong version, run
+`npm ci --prefix orchestrator` again. Future runtime upgrades must update the
+exact version in `orchestrator/package.json`, regenerate its lock file, and
+pass the orchestrator tests plus a real end-to-end run before being accepted.

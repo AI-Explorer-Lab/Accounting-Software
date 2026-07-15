@@ -1,5 +1,16 @@
 <template>
   <main class="shell">
+    <button
+      class="theme-toggle"
+      type="button"
+      :aria-pressed="isDarkMode"
+      :aria-label="isDarkMode ? '切换到浅色模式' : '切换到黑暗模式'"
+      @click="toggleDarkMode"
+    >
+      <span aria-hidden="true">{{ isDarkMode ? '☀' : '☾' }}</span>
+      {{ isDarkMode ? '浅色模式' : '黑暗模式' }}
+    </button>
+
     <header class="hero">
       <p class="eyebrow">ACCOUNTING SOFTWARE</p>
       <h1>清楚记录每一笔收支</h1>
@@ -34,8 +45,14 @@ import TransactionForm from './components/TransactionForm.vue'
 import TransactionList from './components/TransactionList.vue'
 
 const transactionRefreshKey = ref(0)
+const isDarkMode = ref(document.documentElement.dataset.theme === 'dark')
 
 function refreshTransactions() {
   transactionRefreshKey.value += 1
+}
+
+function toggleDarkMode() {
+  isDarkMode.value = !isDarkMode.value
+  document.documentElement.dataset.theme = isDarkMode.value ? 'dark' : 'light'
 }
 </script>
