@@ -6,6 +6,13 @@
   background: #edf1eb;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color: #e5eee8;
+  background: #0c1410;
+  color-scheme: dark;
 }
 
 * {
@@ -19,6 +26,13 @@ body {
   background:
     radial-gradient(circle at top right, rgba(206, 224, 195, 0.85), transparent 38rem),
     #edf1eb;
+  transition: color 180ms ease, background 180ms ease;
+}
+
+:root[data-theme="dark"] body {
+  background:
+    radial-gradient(circle at top right, rgba(51, 91, 68, 0.42), transparent 38rem),
+    #0c1410;
 }
 
 button {
@@ -45,10 +59,27 @@ button:disabled:hover {
   background: #274f3a;
 }
 
+.theme-toggle {
+  position: fixed;
+  z-index: 10;
+  top: 1.25rem;
+  right: 1.25rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid rgba(52, 81, 63, 0.2);
+  box-shadow: 0 0.6rem 1.8rem rgba(49, 68, 56, 0.15);
+}
+
+.theme-toggle:focus-visible {
+  outline: 0.2rem solid #6ca783;
+  outline-offset: 0.2rem;
+}
+
 .shell {
   width: min(960px, calc(100% - 2rem));
   margin: 0 auto;
-  padding: clamp(3rem, 8vw, 7rem) 0;
+  padding: clamp(5rem, 8vw, 7rem) 0;
 }
 
 .hero {
@@ -404,6 +435,112 @@ h2 {
 .architecture span {
   color: #617067;
   text-align: right;
+}
+
+:root[data-theme="dark"] .theme-toggle {
+  border-color: rgba(181, 211, 191, 0.2);
+  color: #dfeae3;
+  background: #244b36;
+  box-shadow: 0 0.6rem 1.8rem rgba(0, 0, 0, 0.28);
+}
+
+:root[data-theme="dark"] .theme-toggle:hover {
+  background: #2d6044;
+}
+
+:root[data-theme="dark"] .eyebrow {
+  color: #9db8a6;
+}
+
+:root[data-theme="dark"] .intro,
+:root[data-theme="dark"] .section-heading > p,
+:root[data-theme="dark"] .list-state,
+:root[data-theme="dark"] .transaction-table th,
+:root[data-theme="dark"] .transaction-table .description,
+:root[data-theme="dark"] .pagination,
+:root[data-theme="dark"] .architecture span {
+  color: #a7b8ad;
+}
+
+:root[data-theme="dark"] .transaction-card,
+:root[data-theme="dark"] .transaction-list-card,
+:root[data-theme="dark"] .health-card,
+:root[data-theme="dark"] .architecture {
+  border-color: rgba(181, 211, 191, 0.16);
+  background: rgba(24, 38, 30, 0.88);
+  box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, 0.2);
+}
+
+:root[data-theme="dark"] .transaction-form label,
+:root[data-theme="dark"] .transaction-filters label {
+  color: #c9d8ce;
+}
+
+:root[data-theme="dark"] .transaction-form small {
+  color: #93a399;
+}
+
+:root[data-theme="dark"] .transaction-form input,
+:root[data-theme="dark"] .transaction-form select,
+:root[data-theme="dark"] .transaction-form textarea,
+:root[data-theme="dark"] .transaction-filters input,
+:root[data-theme="dark"] .transaction-filters select {
+  border-color: rgba(181, 211, 191, 0.22);
+  color: #e5eee8;
+  background: rgba(9, 18, 13, 0.72);
+}
+
+:root[data-theme="dark"] .transaction-form input:focus,
+:root[data-theme="dark"] .transaction-form select:focus,
+:root[data-theme="dark"] .transaction-form textarea:focus,
+:root[data-theme="dark"] .transaction-filters input:focus,
+:root[data-theme="dark"] .transaction-filters select:focus {
+  border-color: #6ca783;
+  box-shadow: 0 0 0 0.2rem rgba(108, 167, 131, 0.15);
+}
+
+:root[data-theme="dark"] .transaction-filters,
+:root[data-theme="dark"] .transaction-table th,
+:root[data-theme="dark"] .transaction-table td,
+:root[data-theme="dark"] .architecture li {
+  border-color: rgba(181, 211, 191, 0.13);
+}
+
+:root[data-theme="dark"] .secondary-button {
+  border-color: rgba(181, 211, 191, 0.28);
+  color: #cce0d3;
+}
+
+:root[data-theme="dark"] .secondary-button:hover {
+  background: rgba(181, 211, 191, 0.1);
+}
+
+:root[data-theme="dark"] .transaction-type.income {
+  color: #a9d9b7;
+  background: #203e2b;
+}
+
+:root[data-theme="dark"] .transaction-type.expense,
+:root[data-theme="dark"] .delete-button {
+  color: #efb0a8;
+  background: #482a27;
+}
+
+:root[data-theme="dark"] .delete-button:hover {
+  background: #5b3430;
+}
+
+:root[data-theme="dark"] .success-message {
+  color: #77c494;
+}
+
+:root[data-theme="dark"] .form-error,
+:root[data-theme="dark"] .offline {
+  color: #ef9f95;
+}
+
+:root[data-theme="dark"] .pending {
+  color: #d2c184;
 }
 
 @media (max-width: 680px) {

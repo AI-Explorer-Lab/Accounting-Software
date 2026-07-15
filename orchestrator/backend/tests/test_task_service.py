@@ -1,0 +1,183 @@
+from __future__ import annotations
+
+from pathlib import Path
+from threading import Event
+
+import pytest
+
+from orchestrator.backend.exceptions.business_exception import (
+    InvalidTaskIdError,
+    TaskConflictError,
+    TaskNotFoundError,
+    TaskNotReadyError,
+)
+from orchestrator.backend.service.task_service import TaskService
+from orchestrator.codex_loop.models import RunResult, TaskSpec
+from orchestrator.codex_loop.report import ReportBuilder
+from orchestrator.codex_loop.state import StateStore
+
+
+class CompletingWorkflow:
+    def __init__(self, store: StateStore) -> None:
+        self.store = store
+
+    def start(self, task: TaskSpec) -> RunResult:
+        state = self.store.initialize_run(task)
+        state.thread_id = "thread-started"
+        state.mark_success("M changed.py")
+        self.store.save_state(state)
+        result, report = ReportBuilder().build(task, state)
+        self.store.save_result(result)
+        self.store.save_report(task.task_id, report)
+        return result
+
+    def resume(self, task_id: str) -> RunResult:
+        task = self.store.load_task(task_id)
+        state = self.store.load_state(task_id)
+        state.thread_id = state.thread_id or "thread-resumed"
+        state.mark_success("M resumed.py")
+        self.store.save_state(state)
+        result, report = ReportBuilder().build(task, state)
+        self.store.save_result(result)
+        self.store.save_report(task.task_id, report)
+        return result
+
+
+class BlockingWorkflow(CompletingWorkflow):
+    def __init__(self, store: StateStore, started: Event, release: Event) -> None:
+        super().__init__(store)
+        self.started = started
+        self.release = release
+
+    def start(self, task: TaskSpec) -> RunResult:
+        state = self.store.initialize_run(task)
+        self.started.set()
+        assert self.release.wait(timeout=5)
+        state.mark_success()
+        self.store.save_state(state)
+        result, report = ReportBuilder().build(task, state)
+        self.store.save_result(result)
+        self.store.save_report(task.task_id, report)
+        return result
+
+
+class FailingWorkflow:
+    def start(self, task: TaskSpec) -> RunResult:
+        raise RuntimeError("token=super-secret")
+
+    def resume(self, task_id: str) -> RunResult:  # pragma: no cover - not used
+        raise AssertionError(task_id)
+
+
+def test_start_returns_immediately_and_final_state_is_read_from_store(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path)
+    service = TaskService(
+        tmp_path,
+        workflow_factory=lambda: CompletingWorkflow(store),
+    )
+    try:
+        accepted = service.start_task("Add filtering", ["Filtering works"])
+        record = service.executor.get(accepted.task_id)
+        assert record is not None
+        record.future.result(timeout=5)
+
+        completed = service.get_task(accepted.task_id)
+        assert accepted.status == "accepted"
+        assert completed.status == "success"
+        assert completed.thread_id == "thread-started"
+        assert service.get_report(accepted.task_id).startswith("# Codex 编排结果")
+    finally:
+        service.close(wait=True)
+
+
+def test_second_task_is_rejected_while_first_is_running(tmp_path: Path) -> None:
+    started = Event()
+    release = Event()
+    store = StateStore(tmp_path)
+    service = TaskService(
+        tmp_path,
+        workflow_factory=lambda: BlockingWorkflow(store, started, release),
+    )
+    try:
+        first = service.start_task("First", ["First works"])
+        assert started.wait(timeout=5)
+
+        with pytest.raises(TaskConflictError, match="already running"):
+            service.start_task("Second", ["Second works"])
+
+        release.set()
+        record = service.executor.get(first.task_id)
+        assert record is not None
+        record.future.result(timeout=5)
+    finally:
+        release.set()
+        service.close(wait=True)
+
+
+def test_resume_uses_existing_task_and_state(tmp_path: Path) -> None:
+    store = StateStore(tmp_path)
+    task = TaskSpec(
+        task_id="resume-me",
+        requirement="Resume",
+        acceptance_criteria=["Finishes"],
+    )
+    state = store.initialize_run(task)
+    state.thread_id = "thread-existing"
+    store.save_state(state)
+    service = TaskService(
+        tmp_path,
+        workflow_factory=lambda: CompletingWorkflow(store),
+    )
+    try:
+        resumed = service.resume_task(task.task_id)
+        record = service.executor.get(task.task_id)
+        assert record is not None
+        record.future.result(timeout=5)
+
+        assert resumed.status == "running"
+        assert service.get_task(task.task_id).status == "success"
+        assert service.get_task(task.task_id).thread_id == "thread-existing"
+    finally:
+        service.close(wait=True)
+
+
+def test_background_failure_is_exposed_as_redacted_infrastructure_error(
+    tmp_path: Path,
+) -> None:
+    service = TaskService(tmp_path, workflow_factory=FailingWorkflow)
+    try:
+        accepted = service.start_task("Fail safely", ["Error is reported"])
+        record = service.executor.get(accepted.task_id)
+        assert record is not None
+        with pytest.raises(RuntimeError):
+            record.future.result(timeout=5)
+
+        snapshot = service.get_task(accepted.task_id)
+        assert snapshot.status == "infrastructure_error"
+        assert "super-secret" not in (snapshot.infrastructure_error or "")
+    finally:
+        service.close(wait=True)
+
+
+def test_invalid_missing_and_not_ready_tasks_have_distinct_errors(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path)
+    task = TaskSpec(
+        task_id="not-ready",
+        requirement="Wait",
+        acceptance_criteria=["Eventually completes"],
+    )
+    store.initialize_run(task)
+    service = TaskService(tmp_path)
+    try:
+        with pytest.raises(InvalidTaskIdError):
+            service.get_task("../outside")
+        with pytest.raises(TaskNotFoundError):
+            service.get_task("missing-task")
+        with pytest.raises(TaskNotReadyError):
+            service.get_report(task.task_id)
+    finally:
+        service.close(wait=True)
