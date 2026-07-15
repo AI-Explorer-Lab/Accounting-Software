@@ -7,7 +7,7 @@ as individual arguments with ``shell=False``.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -17,7 +17,12 @@ import subprocess
 import time
 from typing import Iterable, Mapping, Protocol, Sequence
 
-from .models import CommandResult, InfrastructureError, ValidationRound
+from .models import (
+    PROJECT_TIMEZONE,
+    CommandResult,
+    InfrastructureError,
+    ValidationRound,
+)
 
 
 BACKEND_TEST_ROOT = Path("backend/tests")
@@ -581,7 +586,7 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(PROJECT_TIMEZONE).isoformat()
 
 
 def _coerce_output(value: str | bytes | None) -> str:

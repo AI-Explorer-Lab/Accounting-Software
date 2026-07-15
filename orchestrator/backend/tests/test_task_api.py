@@ -51,8 +51,8 @@ def _snapshot(
         acceptance_criteria=["Filtering works"],
         status=status,
         phase="initialized" if status == "running" else None,
-        started_at="2026-07-15T00:00:00Z",
-        updated_at="2026-07-15T00:00:00Z",
+        started_at="2026-07-15T08:00:00+08:00",
+        updated_at="2026-07-15T08:00:00+08:00",
     )
 
 

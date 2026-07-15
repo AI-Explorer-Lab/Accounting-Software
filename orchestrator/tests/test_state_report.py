@@ -17,6 +17,7 @@ from orchestrator.codex_loop.models import (
     TaskSpec,
     ValidationRound,
     generate_task_id,
+    utc_now_iso,
 )
 from orchestrator.codex_loop.report import ReportBuilder, render_repair_prompt
 from orchestrator.codex_loop.state import ActiveRunError, StateStore
@@ -48,7 +49,7 @@ class StateAndReportTests(unittest.TestCase):
             command=["pytest", "-q", "backend/tests/test_transactions.py"],
             cwd=str(self.repo_root),
             stage="targeted",
-            started_at="2026-07-15T00:00:00+00:00",
+            started_at="2026-07-15T08:00:00+08:00",
             duration_seconds=0.25,
             exit_code=exit_code,
             stdout=stdout,
@@ -101,6 +102,11 @@ class StateAndReportTests(unittest.TestCase):
         self.assertEqual(task_timezone.utcoffset(None), timedelta(hours=8))
         self.assertRegex(task_id, r"^20260715-215622-[0-9a-f]{8}$")
 
+    def test_persisted_timestamps_use_utc_plus_8_time(self) -> None:
+        timestamp = datetime.fromisoformat(utc_now_iso())
+
+        self.assertEqual(timestamp.utcoffset(), timedelta(hours=8))
+
     def test_command_result_normalizes_paths_before_json_persistence(self) -> None:
         log_path = self.repo_root / "logs" / "command.log"
         command = CommandResult(
@@ -135,8 +141,8 @@ class StateAndReportTests(unittest.TestCase):
             targeted_results=[command],
             passed=True,
             stage="full",
-            started_at="2026-07-15T00:00:00+00:00",
-            finished_at="2026-07-15T00:00:01+00:00",
+            started_at="2026-07-15T08:00:00+08:00",
+            finished_at="2026-07-15T08:00:01+08:00",
         )
         state.add_round(validation_round)
         state.mark_success("M backend/controller/transaction_api.py")
@@ -182,7 +188,7 @@ class StateAndReportTests(unittest.TestCase):
                     "pid": 999_999_999,
                     "token": "dead-token",
                     "hostname": socket.gethostname(),
-                    "acquired_at": "2026-07-14T00:00:00+00:00",
+                    "acquired_at": "2026-07-14T08:00:00+08:00",
                 }
             ),
             encoding="utf-8",

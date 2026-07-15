@@ -17,7 +17,7 @@ describe('TransactionForm', () => {
 
   it('disables submit when amount is empty or not positive', async () => {
     const wrapper = mount(TransactionForm)
-    const category = wrapper.get<HTMLInputElement>('input[name="category"]')
+    const category = wrapper.get<HTMLSelectElement>('select[name="category"]')
     const amount = wrapper.get<HTMLInputElement>('input[name="amount"]')
     const submit = wrapper.get<HTMLButtonElement>('button[type="submit"]')
 
@@ -32,6 +32,16 @@ describe('TransactionForm', () => {
 
     await amount.setValue('12.50')
     expect(submit.element.disabled).toBe(false)
+  })
+
+  it('uses a category dropdown with at least five selectable categories', () => {
+    const wrapper = mount(TransactionForm)
+    const category = wrapper.get<HTMLSelectElement>('select[name="category"]')
+    const options = category.findAll('option:not([disabled])')
+
+    expect(wrapper.find('input[name="category"]').exists()).toBe(false)
+    expect(options.length).toBeGreaterThanOrEqual(5)
+    expect(options.map((option) => option.attributes('value'))).toContain('餐饮')
   })
 
   it.each(['expense', 'income'] as const)(
@@ -54,7 +64,7 @@ describe('TransactionForm', () => {
 
       await wrapper.get('select[name="transaction_type"]').setValue(type)
       await wrapper.get('input[name="amount"]').setValue('125.50')
-      await wrapper.get('input[name="category"]').setValue('餐饮')
+      await wrapper.get('select[name="category"]').setValue('餐饮')
       await wrapper.get('textarea[name="description"]').setValue('团队午餐')
       await wrapper.get('input[name="transaction_date"]').setValue('2026-07-14')
       await wrapper.get('form').trigger('submit')

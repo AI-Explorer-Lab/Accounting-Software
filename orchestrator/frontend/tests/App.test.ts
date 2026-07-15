@@ -29,9 +29,9 @@ function task(
     rounds: [],
     last_error_summary: "",
     infrastructure_error: null,
-    started_at: "2026-07-15T00:00:00Z",
-    updated_at: "2026-07-15T00:00:01Z",
-    finished_at: status === "success" ? "2026-07-15T00:00:02Z" : null,
+    started_at: "2026-07-15T08:00:00+08:00",
+    updated_at: "2026-07-15T08:00:01+08:00",
+    finished_at: status === "success" ? "2026-07-15T08:00:02+08:00" : null,
     report_url: status === "success" ? "/api/tasks/task-1/report" : null,
     ...overrides,
   };
@@ -117,7 +117,7 @@ describe("App", () => {
     api.getTask.mockResolvedValue(
       task(status, {
         ...overrides,
-        finished_at: "2026-07-15T00:00:02Z",
+        finished_at: "2026-07-15T08:00:02+08:00",
         report_url: "/api/tasks/task-1/report",
       }),
     );

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 import json
 from pathlib import Path
@@ -12,19 +12,19 @@ from typing import Any, ClassVar, Mapping
 from uuid import uuid4
 
 
-TASK_ID_TIMEZONE = timezone(timedelta(hours=8), "UTC+08:00")
+PROJECT_TIMEZONE = timezone(timedelta(hours=8), "UTC+08:00")
 
 
 def utc_now_iso() -> str:
-    """Return a stable, timezone-aware timestamp suitable for JSON."""
+    """Return a stable UTC+8 timestamp suitable for JSON."""
 
-    return datetime.now(UTC).isoformat(timespec="milliseconds")
+    return datetime.now(PROJECT_TIMEZONE).isoformat(timespec="milliseconds")
 
 
 def generate_task_id() -> str:
     """Generate a UTC+8 task id that is also safe as a directory name."""
 
-    timestamp = datetime.now(TASK_ID_TIMEZONE).strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.now(PROJECT_TIMEZONE).strftime("%Y%m%d-%H%M%S")
     return f"{timestamp}-{uuid4().hex[:8]}"
 
 
