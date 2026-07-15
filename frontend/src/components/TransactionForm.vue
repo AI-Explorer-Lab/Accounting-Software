@@ -5,6 +5,10 @@ import {
   type TransactionType,
 } from '../api/transactions'
 
+const emit = defineEmits<{
+  created: []
+}>()
+
 const initialDate = () => new Date().toISOString().slice(0, 10)
 
 const transactionType = ref<TransactionType>('expense')
@@ -55,6 +59,7 @@ async function submitTransaction() {
     description.value = ''
     transactionDate.value = initialDate()
     successMessage.value = '交易已成功保存'
+    emit('created')
   } catch (caught) {
     errorMessage.value = caught instanceof Error ? caught.message : '交易保存失败，请稍后重试'
   } finally {

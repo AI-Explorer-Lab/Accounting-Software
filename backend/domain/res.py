@@ -32,3 +32,14 @@ class TransactionData(BaseModel):
     description: str | None
     transaction_date: date
     transaction_type: TransactionType
+
+
+class TransactionPageData(BaseModel):
+    items: list[TransactionData]
+    total: int
+    page: int
+    page_size: int
+
+
+class TransactionDeleteData(BaseModel):
+    id: int

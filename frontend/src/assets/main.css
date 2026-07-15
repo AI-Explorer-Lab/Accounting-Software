@@ -94,6 +94,7 @@ h2 {
 }
 
 .transaction-card,
+.transaction-list-card,
 .health-card,
 .architecture {
   display: flex;
@@ -109,6 +110,11 @@ h2 {
 }
 
 .transaction-card {
+  display: block;
+  margin-bottom: 1rem;
+}
+
+.transaction-list-card {
   display: block;
   margin-bottom: 1rem;
 }
@@ -148,7 +154,9 @@ h2 {
 
 .transaction-form input,
 .transaction-form select,
-.transaction-form textarea {
+.transaction-form textarea,
+.transaction-filters input,
+.transaction-filters select {
   width: 100%;
   border: 1px solid rgba(52, 81, 63, 0.24);
   border-radius: 0.8rem;
@@ -162,7 +170,9 @@ h2 {
 
 .transaction-form input:focus,
 .transaction-form select:focus,
-.transaction-form textarea:focus {
+.transaction-form textarea:focus,
+.transaction-filters input:focus,
+.transaction-filters select:focus {
   border-color: #2d6b49;
   box-shadow: 0 0 0 0.2rem rgba(45, 107, 73, 0.12);
 }
@@ -193,6 +203,148 @@ h2 {
 
 .form-error {
   color: #9c4337;
+}
+
+.transaction-filters {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid rgba(52, 81, 63, 0.14);
+}
+
+.transaction-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  color: #34493d;
+  font-size: 0.85rem;
+  font-weight: 750;
+}
+
+.filter-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.6rem;
+  grid-column: 1 / -1;
+}
+
+.secondary-button {
+  border: 1px solid rgba(52, 81, 63, 0.25);
+  color: #274f3a;
+  background: transparent;
+}
+
+.secondary-button:hover {
+  background: rgba(39, 79, 58, 0.08);
+}
+
+.list-feedback {
+  min-height: 1.5rem;
+  padding-top: 1rem;
+}
+
+.list-feedback p,
+.list-state {
+  margin-bottom: 0;
+}
+
+.list-state {
+  padding: 2.5rem 0 1rem;
+  color: #617067;
+  text-align: center;
+}
+
+.transaction-table-wrap {
+  overflow-x: auto;
+}
+
+.transaction-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+.transaction-table th,
+.transaction-table td {
+  padding: 0.9rem 0.65rem;
+  border-bottom: 1px solid rgba(52, 81, 63, 0.12);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.transaction-table th {
+  color: #617067;
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.transaction-table .amount {
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.transaction-table .description {
+  max-width: 14rem;
+  color: #617067;
+}
+
+.transaction-type {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.transaction-type.income {
+  color: #276341;
+  background: #dcecdf;
+}
+
+.transaction-type.expense {
+  color: #8a4137;
+  background: #f3dfdb;
+}
+
+.delete-cell {
+  text-align: right !important;
+}
+
+.delete-button {
+  padding: 0.5rem 0.75rem;
+  color: #8a4137;
+  background: #f3dfdb;
+  font-size: 0.82rem;
+}
+
+.delete-button:hover {
+  background: #eacac4;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  padding-top: 1.5rem;
+  color: #526158;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .status {
@@ -264,6 +416,14 @@ h2 {
 
   .transaction-form {
     grid-template-columns: 1fr;
+  }
+
+  .transaction-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .filter-actions {
+    grid-column: auto;
   }
 
   .full-width {

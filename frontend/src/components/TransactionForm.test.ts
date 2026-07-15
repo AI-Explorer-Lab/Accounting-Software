@@ -68,6 +68,7 @@ describe('TransactionForm', () => {
         transaction_type: type,
       })
       expect(wrapper.get('[role="status"]').text()).toBe('交易已成功保存')
+      expect(wrapper.emitted('created')).toHaveLength(1)
     },
   )
 })
