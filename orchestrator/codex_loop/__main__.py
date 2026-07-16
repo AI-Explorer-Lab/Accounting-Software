@@ -10,12 +10,14 @@ from typing import Any
 
 from .models import (
     InfrastructureError,
+    ReviewStatus,
     RunResult,
     RunState,
     RunStatus,
     TaskSpec,
 )
 from .report import ReportBuilder
+from .review import ReviewError, ReviewService
 from .state import ActiveRunError, StateStore, redact_sensitive_text
 from .workflow import OrchestrationWorkflow
 
@@ -45,6 +47,28 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser = subparsers.add_parser("resume", help="resume a saved task")
     resume_parser.add_argument("--task-id")
     _add_timeout_argument(resume_parser)
+
+    review_parser = subparsers.add_parser(
+        "review", help="record the task's immutable human review"
+    )
+    review_parser.add_argument("--task-id", required=True)
+    review_parser.add_argument(
+        "--decision",
+        required=True,
+        choices=[
+            ReviewStatus.APPROVED.value,
+            ReviewStatus.CHANGES_REQUESTED.value,
+            ReviewStatus.REJECTED.value,
+        ],
+    )
+    review_parser.add_argument("--reviewer", required=True)
+    review_parser.add_argument("--comment", default="")
+    review_parser.add_argument("--reviewed-diff-sha256", required=True)
+
+    show_parser = subparsers.add_parser(
+        "show", help="show read-only workspace, permission, and audit metadata"
+    )
+    show_parser.add_argument("--task-id", required=True)
     return parser
 
 
@@ -76,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
                 validation_timeout_seconds=args.timeout_seconds,
             )
             result = workflow.start(task)
-        else:
+        elif args.command == "resume":
             task_id = args.task_id or _find_resumable_task_id(store)
             workflow = OrchestrationWorkflow(
                 REPO_ROOT,
@@ -84,10 +108,23 @@ def main(argv: list[str] | None = None) -> int:
                 validation_timeout_seconds=args.timeout_seconds,
             )
             result = workflow.resume(task_id)
+        elif args.command == "review":
+            review = ReviewService(REPO_ROOT, store=store).record(
+                args.task_id,
+                decision=args.decision,
+                reviewer=args.reviewer,
+                comment=args.comment,
+                reviewed_diff_sha256=args.reviewed_diff_sha256,
+            )
+            print(json.dumps(review.to_dict(), ensure_ascii=False, indent=2))
+            return 0
+        else:
+            _print_run_metadata(store, args.task_id)
+            return 0
     except ActiveRunError as exc:
         print(f"无法启动：{redact_sensitive_text(str(exc))}", file=sys.stderr)
         return 2
-    except (InfrastructureError, OSError, ValueError) as exc:
+    except (InfrastructureError, ReviewError, OSError, ValueError) as exc:
         print(f"编排器错误：{redact_sensitive_text(str(exc))}", file=sys.stderr)
         return 2
     except (EOFError, KeyboardInterrupt):
@@ -201,6 +238,42 @@ def _print_result(result: RunResult, store: StateStore) -> None:
     print(f"状态：{result.status.value}")
     print(f"报告：{run_dir / 'report.md'}")
     print(f"结果：{run_dir / 'result.json'}")
+
+
+def _print_run_metadata(store: StateStore, task_id: str) -> None:
+    run_dir = store.run_dir(task_id)
+    state = store.load_state(task_id)
+    data: dict[str, Any] = {
+        "task_id": task_id,
+        "schema_version": state.schema_version,
+        "machine_status": state.status.value,
+        "review_status": state.review_status.value,
+        "workspace": None,
+        "permissions": None,
+        "audit": {"event_count": 0, "denied_event_count": 0},
+    }
+    manifest_path = run_dir / "manifest.json"
+    permissions_path = run_dir / "permissions.json"
+    events_path = run_dir / "events.jsonl"
+    if manifest_path.is_file():
+        data["workspace"] = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if permissions_path.is_file():
+        data["permissions"] = json.loads(
+            permissions_path.read_text(encoding="utf-8")
+        )
+    if events_path.is_file():
+        events = [
+            json.loads(line)
+            for line in events_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        data["audit"] = {
+            "event_count": len(events),
+            "denied_event_count": sum(
+                event.get("type") == "permission.denied" for event in events
+            ),
+        }
+    print(json.dumps(data, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

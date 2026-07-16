@@ -4,13 +4,19 @@ import { computed, onMounted, onUnmounted, ref } from "vue";
 import {
   createTask,
   getTask,
+  getTaskDiff,
   getTaskReport,
+  submitTaskReview,
 } from "./api/tasks";
 import ReportPanel from "./components/ReportPanel.vue";
 import TaskForm from "./components/TaskForm.vue";
 import TaskStatus from "./components/TaskStatus.vue";
 import ValidationRounds from "./components/ValidationRounds.vue";
-import type { TaskCreatePayload, TaskData } from "./types/task";
+import type {
+  ReviewDecision,
+  TaskCreatePayload,
+  TaskData,
+} from "./types/task";
 
 
 const STORAGE_KEY = "codex-orchestrator:last-task-id";
@@ -23,7 +29,9 @@ const FINAL_STATUSES = new Set<TaskData["status"]>([
 
 const task = ref<TaskData | null>(null);
 const report = ref("");
+const diff = ref("");
 const submitting = ref(false);
+const reviewing = ref(false);
 const pageError = ref("");
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -54,6 +62,18 @@ async function loadReport(taskId: string): Promise<void> {
   }
 }
 
+async function loadDiff(taskId: string): Promise<void> {
+  if (!task.value?.diff_url) {
+    diff.value = "";
+    return;
+  }
+  try {
+    diff.value = await getTaskDiff(taskId);
+  } catch (error) {
+    pageError.value = error instanceof Error ? error.message : "Diff 读取失败。";
+  }
+}
+
 async function refreshTask(taskId: string): Promise<void> {
   try {
     const latest = await getTask(taskId);
@@ -61,7 +81,7 @@ async function refreshTask(taskId: string): Promise<void> {
     pageError.value = "";
     if (FINAL_STATUSES.has(latest.status)) {
       clearPollTimer();
-      await loadReport(taskId);
+      await Promise.all([loadReport(taskId), loadDiff(taskId)]);
       return;
     }
     schedulePoll(taskId);
@@ -75,6 +95,7 @@ async function submitTask(payload: TaskCreatePayload): Promise<void> {
   submitting.value = true;
   pageError.value = "";
   report.value = "";
+  diff.value = "";
   clearPollTimer();
   try {
     const accepted = await createTask(payload);
@@ -85,6 +106,27 @@ async function submitTask(payload: TaskCreatePayload): Promise<void> {
     pageError.value = error instanceof Error ? error.message : "任务提交失败。";
   } finally {
     submitting.value = false;
+  }
+}
+
+async function submitReview(payload: {
+  decision: ReviewDecision;
+  reviewer: string;
+  comment: string;
+}): Promise<void> {
+  if (!task.value) return;
+  reviewing.value = true;
+  pageError.value = "";
+  try {
+    task.value = await submitTaskReview(task.value.task_id, {
+      ...payload,
+      reviewed_diff_sha256: task.value.final_diff_sha256,
+    });
+    await loadReport(task.value.task_id);
+  } catch (error) {
+    pageError.value = error instanceof Error ? error.message : "审查提交失败。";
+  } finally {
+    reviewing.value = false;
   }
 }
 
@@ -130,7 +172,14 @@ onUnmounted(clearPollTimer);
 
       <TaskStatus v-if="task" :task="task" />
       <ValidationRounds v-if="task" :rounds="task.rounds" />
-      <ReportPanel :report="report" />
+      <ReportPanel
+        v-if="task && FINAL_STATUSES.has(task.status)"
+        :task="task"
+        :report="report"
+        :diff="diff"
+        :submitting-review="reviewing"
+        @review="submitReview"
+      />
     </main>
 
     <footer>

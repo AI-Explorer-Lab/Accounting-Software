@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 import json
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -17,6 +18,7 @@ from uuid import uuid4
 
 from .models import (
     CommandResult,
+    ReviewRecord,
     RunResult,
     RunState,
     TaskSpec,
@@ -213,14 +215,29 @@ class StateStore:
         self,
         task: TaskSpec,
         *,
+        task_repo_root: str | Path | None = None,
+        workspace: Mapping[str, Any] | None = None,
         baseline_git_status: str = "",
         baseline_test_hashes: Mapping[str, str] | None = None,
     ) -> RunState:
         run_directory = self.run_dir(task.task_id)
+        if run_directory.exists() and any(run_directory.iterdir()):
+            raise ValueError(f"run directory already exists: {task.task_id}")
         run_directory.mkdir(parents=True, exist_ok=True)
+        workspace_values = dict(workspace or {})
         state = RunState(
             task_id=task.task_id,
-            repo_root=str(self.repo_root),
+            repo_root=str(Path(task_repo_root or self.repo_root).resolve()),
+            control_repo_root=str(self.repo_root),
+            base_ref=str(workspace_values.get("base_ref", "HEAD")),
+            base_commit=str(workspace_values.get("base_commit", "")),
+            task_branch=str(workspace_values.get("task_branch", "")),
+            worktree_relative_path=str(
+                workspace_values.get("worktree_relative_path", "")
+            ),
+            source_worktree_was_dirty=bool(
+                workspace_values.get("source_worktree_was_dirty", False)
+            ),
             baseline_git_status=baseline_git_status,
             baseline_test_hashes=dict(baseline_test_hashes or {}),
             protected_test_paths=sorted((baseline_test_hashes or {}).keys()),
@@ -231,6 +248,11 @@ class StateStore:
 
     def save_task(self, task: TaskSpec) -> Path:
         path = self.run_dir(task.task_id) / "task.json"
+        if path.is_file():
+            existing = TaskSpec.from_dict(_read_json(path))
+            if existing.to_dict() != task.to_dict():
+                raise ValueError("task.json is immutable once created")
+            return path
         _atomic_write_json(path, task.to_dict())
         return path
 
@@ -240,7 +262,7 @@ class StateStore:
     def save_state(self, state: RunState) -> Path:
         state.touch()
         path = self.run_dir(state.task_id) / "state.json"
-        _atomic_write_json(path, state.to_dict())
+        _atomic_write_json(path, state.to_dict(include_output=False))
         return path
 
     def load_state(self, task_id: str) -> RunState:
@@ -253,6 +275,36 @@ class StateStore:
 
     def load_result(self, task_id: str) -> RunResult:
         return RunResult.from_dict(_read_json(self.run_dir(task_id) / "result.json"))
+
+    def save_manifest(self, task_id: str, manifest: Mapping[str, Any]) -> Path:
+        path = self.run_dir(task_id) / "manifest.json"
+        _atomic_write_json(path, manifest)
+        return path
+
+    def load_manifest(self, task_id: str) -> dict[str, Any]:
+        return _read_json(self.run_dir(task_id) / "manifest.json")
+
+    def save_permissions(
+        self, task_id: str, permissions: Mapping[str, Any]
+    ) -> Path:
+        path = self.run_dir(task_id) / "permissions.json"
+        _atomic_write_json(path, permissions)
+        return path
+
+    def load_permissions(self, task_id: str) -> dict[str, Any]:
+        return _read_json(self.run_dir(task_id) / "permissions.json")
+
+    def save_review(self, review: ReviewRecord) -> Path:
+        path = self.run_dir(review.task_id) / "review.json"
+        if path.exists():
+            raise ValueError("review.json already exists and cannot be overwritten")
+        _atomic_write_json(path, review.to_dict())
+        return path
+
+    def load_review(self, task_id: str) -> ReviewRecord:
+        return ReviewRecord.from_dict(
+            _read_json(self.run_dir(task_id) / "review.json")
+        )
 
     def unfinished_task_ids(self, *, excluding: str | None = None) -> list[str]:
         """Return durable non-final tasks, independent of process-lock liveness."""
@@ -280,7 +332,7 @@ class StateStore:
             / "rounds"
             / f"round-{validation_round.round_number:02d}.json"
         )
-        _atomic_write_json(path, validation_round.to_dict())
+        _atomic_write_json(path, validation_round.to_dict(include_output=False))
         return path
 
     def load_round(self, task_id: str, round_number: int) -> ValidationRound:
@@ -323,6 +375,7 @@ class StateStore:
         )
         _atomic_write_text(path, redact_sensitive_text(content))
         result.log_path = str(path.relative_to(self.repo_root))
+        result.log_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
         return path
 
     def acquire_active_lock(self, task_id: str) -> ActiveLock:

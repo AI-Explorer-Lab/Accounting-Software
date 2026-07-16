@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -36,11 +37,47 @@ class FileRunMapper:
 
         task = self.store.load_task(task_id)
         state = self.store.load_state(task_id)
+        legacy = state.schema_version == 0
+        manifest = self._optional_json(run_dir / "manifest.json")
+        permissions = self._optional_json(run_dir / "permissions.json")
+        changes = self._optional_json(run_dir / "changes/files.json")
+        review = self._optional_json(run_dir / "review.json")
+        events = self._events(run_dir / "events.jsonl")
+        repository = manifest.get("repository", {})
+        workspace = (
+            {
+                "base_ref": repository.get("base_ref", state.base_ref),
+                "base_commit": repository.get("base_commit", state.base_commit),
+                "task_branch": repository.get("task_branch", state.task_branch),
+                "worktree": repository.get(
+                    "worktree_relative_path", state.worktree_relative_path
+                ),
+                "source_worktree_was_dirty": repository.get(
+                    "source_worktree_was_dirty", state.source_worktree_was_dirty
+                ),
+            }
+            if not legacy
+            else {}
+        )
+        final_diff = changes.get("final_diff", {})
         return TaskSnapshot(
             task_id=task.task_id,
             requirement=task.requirement,
             acceptance_criteria=list(task.acceptance_criteria),
             status=state.status.value,
+            schema_version=state.schema_version,
+            legacy=legacy,
+            history_warning=(
+                "历史记录不完整：该任务创建于隔离、权限和完整审计启用之前。"
+                if legacy
+                else None
+            ),
+            machine_status=state.status.value,
+            review_status=(
+                str(review.get("decision"))
+                if review.get("decision")
+                else ("unavailable" if legacy else state.review_status.value)
+            ),
             phase=state.phase.value,
             thread_id=state.thread_id,
             turn_count=state.turn_count,
@@ -56,6 +93,28 @@ class FileRunMapper:
                 if (run_dir / "report.md").is_file()
                 else None
             ),
+            diff_url=(
+                f"/api/tasks/{task.task_id}/diff"
+                if (run_dir / "changes/final.diff").is_file()
+                else None
+            ),
+            workspace=workspace,
+            permissions=permissions,
+            audit_summary={
+                "event_count": len(events),
+                "denied_event_count": sum(
+                    event.get("type") == "permission.denied" for event in events
+                ),
+            },
+            changed_files=list(changes.get("files", [])),
+            codex_responses=self._responses(run_dir),
+            final_diff_sha256=str(
+                final_diff.get("raw_sha256", state.last_diff_sha256)
+            ),
+            diff_redaction_count=int(
+                final_diff.get("redaction_count", state.diff_redaction_count) or 0
+            ),
+            review=review or None,
         )
 
     def load_report(self, task_id: str) -> str | None:
@@ -63,6 +122,48 @@ class FileRunMapper:
         if not path.is_file():
             return None
         return path.read_text(encoding="utf-8")
+
+    def load_diff(self, task_id: str) -> str | None:
+        path = self.store.run_dir(task_id) / "changes/final.diff"
+        if not path.is_file():
+            return None
+        return path.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _optional_json(path: Path) -> dict[str, Any]:
+        if not path.is_file():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _events(path: Path) -> list[dict[str, Any]]:
+        if not path.is_file():
+            return []
+        events: list[dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            if isinstance(value, dict):
+                events.append(value)
+        return events
+
+    @staticmethod
+    def _responses(run_dir: Path) -> list[dict[str, Any]]:
+        responses: list[dict[str, Any]] = []
+        for path in sorted((run_dir / "turns").glob("turn-*/response.md")):
+            try:
+                turn_number = int(path.parent.name.removeprefix("turn-"))
+            except ValueError:
+                continue
+            responses.append(
+                {
+                    "turn_number": turn_number,
+                    "response": path.read_text(encoding="utf-8"),
+                }
+            )
+        return responses
 
     @staticmethod
     def _round_summary(validation_round: ValidationRound) -> dict[str, Any]:
@@ -90,5 +191,6 @@ class FileRunMapper:
             "timed_out": result.timed_out,
             "infrastructure_error": result.infrastructure_error,
             "log_path": result.log_path,
+            "log_sha256": result.log_sha256,
             "passed": result.passed,
         }

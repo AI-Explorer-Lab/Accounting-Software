@@ -49,3 +49,12 @@ class TaskNotReadyError(BusinessException):
             code=ErrorCode.TASK_NOT_READY,
             status_code=409,
         )
+
+
+class ReviewConflictError(BusinessException):
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            code=ErrorCode.TASK_CONFLICT,
+            status_code=409,
+        )

@@ -4,7 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const api = vi.hoisted(() => ({
   createTask: vi.fn(),
   getTask: vi.fn(),
+  getTaskDiff: vi.fn(),
   getTaskReport: vi.fn(),
+  submitTaskReview: vi.fn(),
 }));
 
 vi.mock("../src/api/tasks", () => api);
@@ -22,6 +24,11 @@ function task(
     requirement: "Add filtering",
     acceptance_criteria: ["Filtering works"],
     status,
+    schema_version: 1,
+    legacy: false,
+    history_warning: null,
+    machine_status: status,
+    review_status: "pending",
     phase: status === "running" ? "validating" : "completed",
     thread_id: "thread-1",
     turn_count: 1,
@@ -33,6 +40,19 @@ function task(
     updated_at: "2026-07-15T08:00:01+08:00",
     finished_at: status === "success" ? "2026-07-15T08:00:02+08:00" : null,
     report_url: status === "success" ? "/api/tasks/task-1/report" : null,
+    diff_url: status === "success" ? "/api/tasks/task-1/diff" : null,
+    workspace: {
+      base_commit: "a".repeat(40),
+      task_branch: "codex/task-1",
+      worktree: ".codex-orchestrator/worktrees/task-1",
+    },
+    permissions: { effective: { verified: true, network: "disabled" } },
+    audit_summary: { event_count: 12, denied_event_count: 0 },
+    changed_files: [],
+    codex_responses: [{ turn_number: 1, response: "Implemented." }],
+    final_diff_sha256: "b".repeat(64),
+    diff_redaction_count: 0,
+    review: null,
     ...overrides,
   };
 }
@@ -44,7 +64,10 @@ describe("App", () => {
     localStorage.clear();
     api.createTask.mockReset();
     api.getTask.mockReset();
+    api.getTaskDiff.mockReset();
     api.getTaskReport.mockReset();
+    api.submitTaskReview.mockReset();
+    api.getTaskDiff.mockResolvedValue("diff --git a/file b/file");
   });
 
   afterEach(() => {
@@ -75,7 +98,7 @@ describe("App", () => {
 
     expect(api.getTask).toHaveBeenCalledWith("task-1");
     expect(api.getTaskReport).toHaveBeenCalledWith("task-1");
-    expect(wrapper.get('[data-test="task-status"]').text()).toContain("全部通过");
+    expect(wrapper.get('[data-test="task-status"]').text()).toContain("机器验证通过");
     expect(wrapper.get('[data-test="report-panel"]').text()).toContain(
       "# Final report",
     );
@@ -101,10 +124,69 @@ describe("App", () => {
     wrapper.unmount();
   });
 
+  it("submits an immutable review bound to the displayed diff", async () => {
+    localStorage.setItem("codex-orchestrator:last-task-id", "task-1");
+    api.getTask.mockResolvedValue(task("success"));
+    api.getTaskReport.mockResolvedValue("# Report");
+    api.submitTaskReview.mockResolvedValue(
+      task("success", {
+        review_status: "approved",
+        review: {
+          decision: "approved",
+          reviewer: "Local Reviewer",
+          comment: "Checked.",
+          reviewed_diff_sha256: "b".repeat(64),
+        },
+      }),
+    );
+    const wrapper = mount(App);
+    await flushPromises();
+
+    await wrapper.get('[data-test="reviewer"]').setValue("Local Reviewer");
+    await wrapper.get('[data-test="review-comment"]').setValue("Checked.");
+    await wrapper.get('[data-test="approve"]').trigger("click");
+    await flushPromises();
+
+    expect(api.submitTaskReview).toHaveBeenCalledWith("task-1", {
+      decision: "approved",
+      reviewer: "Local Reviewer",
+      comment: "Checked.",
+      reviewed_diff_sha256: "b".repeat(64),
+    });
+    expect(wrapper.get('[data-test="review-section"]').text()).toContain(
+      "Local Reviewer",
+    );
+    wrapper.unmount();
+  });
+
+  it("marks legacy tasks without inventing review or workspace data", async () => {
+    localStorage.setItem("codex-orchestrator:last-task-id", "task-1");
+    api.getTask.mockResolvedValue(
+      task("success", {
+        schema_version: 0,
+        legacy: true,
+        history_warning: "历史记录不完整。",
+        review_status: "unavailable",
+        workspace: {},
+        permissions: {},
+        diff_url: null,
+      }),
+    );
+    api.getTaskReport.mockResolvedValue("# Old report");
+    const wrapper = mount(App);
+    await flushPromises();
+
+    expect(wrapper.get('[data-test="task-status"]').text()).toContain(
+      "历史记录不完整",
+    );
+    expect(wrapper.find('[data-test="review-section"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it.each([
     {
       status: "manual_review" as const,
-      label: "等待人工审核",
+      label: "机器流程待处理",
       overrides: { last_error_summary: "Three validation rounds failed" },
     },
     {

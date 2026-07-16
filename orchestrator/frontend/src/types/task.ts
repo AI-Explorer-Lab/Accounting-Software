@@ -5,9 +5,25 @@ export type TaskStatus =
   | "manual_review"
   | "infrastructure_error";
 
+export type ReviewStatus =
+  | "pending"
+  | "approved"
+  | "changes_requested"
+  | "rejected"
+  | "unavailable";
+
+export type ReviewDecision = Exclude<ReviewStatus, "pending" | "unavailable">;
+
 export interface TaskCreatePayload {
   requirement: string;
   acceptance_criteria: string[];
+}
+
+export interface ReviewPayload {
+  decision: ReviewDecision;
+  reviewer: string;
+  comment: string;
+  reviewed_diff_sha256: string;
 }
 
 export interface CommandSummary {
@@ -37,6 +53,11 @@ export interface TaskData {
   requirement: string;
   acceptance_criteria: string[];
   status: TaskStatus;
+  schema_version: number;
+  legacy: boolean;
+  history_warning: string | null;
+  machine_status: TaskStatus;
+  review_status: ReviewStatus;
   phase: string | null;
   thread_id: string | null;
   turn_count: number;
@@ -48,6 +69,15 @@ export interface TaskData {
   updated_at: string;
   finished_at: string | null;
   report_url: string | null;
+  diff_url: string | null;
+  workspace: Record<string, unknown>;
+  permissions: Record<string, unknown>;
+  audit_summary: Record<string, unknown>;
+  changed_files: Array<Record<string, unknown>>;
+  codex_responses: Array<{ turn_number: number; response: string }>;
+  final_diff_sha256: string;
+  diff_redaction_count: number;
+  review: Record<string, unknown> | null;
 }
 
 export interface ApiResponse<T> {

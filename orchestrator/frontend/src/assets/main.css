@@ -425,6 +425,117 @@ input:focus {
   white-space: pre-wrap;
 }
 
+.review-section {
+  margin-top: 28px;
+}
+
+.review-section:first-of-type {
+  margin-top: 0;
+}
+
+.review-section h3 {
+  margin: 0 0 12px;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 1.25rem;
+  font-weight: 500;
+}
+
+.empty-copy,
+.hash-copy {
+  color: #747c75;
+  font-size: 0.84rem;
+}
+
+.hash-copy code,
+.review-result code {
+  overflow-wrap: anywhere;
+}
+
+.response-card {
+  margin-top: 12px;
+}
+
+.response-card strong {
+  display: block;
+  margin-bottom: 7px;
+  color: #586159;
+  font-size: 0.8rem;
+}
+
+.change-list {
+  display: grid;
+  gap: 8px;
+}
+
+.change-list div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f1f3ed;
+  font-size: 0.8rem;
+}
+
+.diff-view {
+  max-height: 720px !important;
+  white-space: pre !important;
+}
+
+.review-form {
+  display: grid;
+  gap: 16px;
+}
+
+.review-form label {
+  display: grid;
+  gap: 8px;
+}
+
+.review-form textarea {
+  min-height: 92px;
+}
+
+.review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.review-actions .primary-button,
+.review-actions .secondary-button {
+  justify-self: auto;
+}
+
+.danger-button {
+  background: #fde1da;
+  color: #a6402d;
+}
+
+.review-result {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.review-result div {
+  padding: 12px;
+  border-radius: 8px;
+  background: #f1f3ed;
+}
+
+.review-result dt {
+  margin-bottom: 5px;
+  color: #747c75;
+  font-size: 0.73rem;
+}
+
+.review-result dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 footer {
   display: flex;
   justify-content: space-between;
@@ -466,6 +577,11 @@ footer {
 
   .status-grid {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .change-list div,
+  .review-result {
+    grid-template-columns: 1fr;
   }
 }
 

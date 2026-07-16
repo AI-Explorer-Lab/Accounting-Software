@@ -154,10 +154,13 @@ class StateAndReportTests(unittest.TestCase):
         self.store.save_report(task.task_id, "# report\n")
 
         self.assertEqual(self.store.load_task(task.task_id), task)
-        self.assertEqual(self.store.load_state(task.task_id).to_dict(), state.to_dict())
         self.assertEqual(
-            self.store.load_round(task.task_id, 1).to_dict(),
-            validation_round.to_dict(),
+            self.store.load_state(task.task_id).to_dict(include_output=False),
+            state.to_dict(include_output=False),
+        )
+        self.assertEqual(
+            self.store.load_round(task.task_id, 1).to_dict(include_output=False),
+            validation_round.to_dict(include_output=False),
         )
         self.assertEqual(
             self.store.load_result(task.task_id).to_dict(), result.to_dict()
@@ -165,6 +168,10 @@ class StateAndReportTests(unittest.TestCase):
         run_dir = self.store.run_dir(task.task_id)
         for artifact in ("task.json", "state.json", "result.json", "report.md"):
             self.assertTrue((run_dir / artifact).is_file())
+        state_text = (run_dir / "state.json").read_text(encoding="utf-8")
+        self.assertNotIn('"stdout"', state_text)
+        self.assertNotIn('"stderr"', state_text)
+        self.assertTrue(command.log_sha256)
         self.assertEqual(list(run_dir.rglob("*.tmp")), [])
 
     def test_active_lock_rejects_a_second_task_until_released(self) -> None:
@@ -281,7 +288,8 @@ class StateAndReportTests(unittest.TestCase):
                 content = artifact.read_text(encoding="utf-8")
                 for secret in raw_secrets:
                     self.assertNotIn(secret, content)
-                self.assertIn("[REDACTED]", content)
+                if artifact != report_path:
+                    self.assertIn("[REDACTED]", content)
 
         complete_log = log_path.read_text(encoding="utf-8")
         self.assertIn("A" * 10_000, complete_log)
@@ -379,19 +387,18 @@ class StateAndReportTests(unittest.TestCase):
 
                 self.assertEqual(result.status, status)
                 for expected in (
-                    status.value,
+                    "# 任务报告",
                     task.requirement,
                     task.acceptance_criteria[0],
                     "thread-audit",
                     "第 1 轮",
                     str(command.log_path),
-                    "M existing.py",
-                    "M final.py",
-                    "失败与人工审核信息",
+                    "## 工作区隔离",
+                    "## 权限",
+                    "## 人工审查",
+                    "pending",
                 ):
                     self.assertIn(expected, report)
-                if infrastructure_error:
-                    self.assertIn(infrastructure_error, report)
 
 
 if __name__ == "__main__":

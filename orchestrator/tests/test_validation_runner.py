@@ -11,6 +11,7 @@ from orchestrator.codex_loop.models import CommandResult, InfrastructureError
 from orchestrator.codex_loop.validation_runner import (
     CONDA_PREFLIGHT_COMMAND,
     FULL_VALIDATION_COMMANDS,
+    NPM_PREFLIGHT_COMMAND,
     SubprocessCommandRunner,
     ValidationRunner,
 )
@@ -23,10 +24,13 @@ class FakeCommandRunner:
         *,
         unavailable: str | None = None,
         probe_response: tuple[int | None, bool] = (0, False),
+        probe_responses: dict[tuple[str, ...], tuple[int | None, bool]]
+        | None = None,
     ) -> None:
         self.responses = deque(responses or [])
         self.unavailable = unavailable
         self.probe_response = probe_response
+        self.probe_responses = dict(probe_responses or {})
         self.commands: list[list[str]] = []
         self.stages: list[str] = []
         self.preflight_calls: list[tuple[str, ...]] = []
@@ -51,7 +55,9 @@ class FakeCommandRunner:
         args = list(command)
         if stage == "preflight":
             self.probe_commands.append(args)
-            exit_code, timed_out = self.probe_response
+            exit_code, timed_out = self.probe_responses.get(
+                tuple(args), self.probe_response
+            )
             return CommandResult(
                 command=args,
                 cwd=str(cwd),
@@ -239,6 +245,23 @@ class ValidationRunnerTests(unittest.TestCase):
         self.assertEqual(fake.commands, [])
         self.assertEqual(fake.probe_commands, [list(CONDA_PREFLIGHT_COMMAND)])
 
+    def test_missing_node_runtime_is_infrastructure_error_before_codex_turn(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner(
+            probe_responses={NPM_PREFLIGHT_COMMAND: (1, False)}
+        )
+        validator = ValidationRunner(self.root, runner=fake)
+
+        with self.assertRaisesRegex(InfrastructureError, "Node/npm"):
+            validator.validate(1)
+
+        self.assertEqual(fake.commands, [])
+        self.assertEqual(
+            fake.probe_commands,
+            [list(CONDA_PREFLIGHT_COMMAND), list(NPM_PREFLIGHT_COMMAND)],
+        )
+
     def test_missing_frontend_tool_is_infrastructure_error(self) -> None:
         (self.root / "frontend/node_modules/.bin/vitest").unlink()
         fake = FakeCommandRunner()
@@ -375,6 +398,52 @@ class ValidationRunnerTests(unittest.TestCase):
         self.assertIsNone(result.exit_code)
         self.assertIn("cannot spawn", result.infrastructure_error or "")
         self.assertIn("cannot spawn", result.stderr)
+
+    def test_required_node_cache_denial_is_an_infrastructure_error(self) -> None:
+        runner = SubprocessCommandRunner()
+        completed = subprocess.CompletedProcess(
+            args=["npm", "--prefix", "frontend", "test"],
+            returncode=1,
+            stdout="",
+            stderr=(
+                "Error: EPERM: operation not permitted, open "
+                "'frontend/node_modules/.vite-temp/config.mjs'"
+            ),
+        )
+        with patch(
+            "orchestrator.codex_loop.validation_runner.subprocess.run",
+            return_value=completed,
+        ):
+            result = runner.run(
+                ("npm", "--prefix", "frontend", "test"),
+                cwd=self.root,
+                stage="full",
+                timeout_seconds=1,
+            )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("required local runtime", result.infrastructure_error or "")
+
+    def test_worker_signal_denial_is_an_infrastructure_error(self) -> None:
+        runner = SubprocessCommandRunner()
+        completed = subprocess.CompletedProcess(
+            args=["npm", "--prefix", "frontend", "test"],
+            returncode=1,
+            stdout="",
+            stderr="Error: kill EPERM",
+        )
+        with patch(
+            "orchestrator.codex_loop.validation_runner.subprocess.run",
+            return_value=completed,
+        ):
+            result = runner.run(
+                ("npm", "--prefix", "frontend", "test"),
+                cwd=self.root,
+                stage="full",
+                timeout_seconds=1,
+            )
+
+        self.assertIn("required local runtime", result.infrastructure_error or "")
 
     def test_subprocess_timeout_is_returned_with_captured_output(self) -> None:
         runner = SubprocessCommandRunner()

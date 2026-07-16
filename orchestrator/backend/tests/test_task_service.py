@@ -87,7 +87,7 @@ def test_start_returns_immediately_and_final_state_is_read_from_store(
         assert accepted.status == "accepted"
         assert completed.status == "success"
         assert completed.thread_id == "thread-started"
-        assert service.get_report(accepted.task_id).startswith("# Codex 编排结果")
+        assert service.get_report(accepted.task_id).startswith("# 任务报告")
     finally:
         service.close(wait=True)
 

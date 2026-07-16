@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Request, status
 from fastapi.responses import PlainTextResponse
 
-from ..domain.req import TaskCreateRequest
+from ..domain.req import ReviewRequest, TaskCreateRequest
 from ..domain.res import ApiResponse, TaskData
 from ..service.task_service import TaskService
 
@@ -54,3 +54,25 @@ async def resume_task(task_id: str, request: Request) -> ApiResponse[TaskData]:
 async def get_report(task_id: str, request: Request) -> PlainTextResponse:
     report = _service(request).get_report(task_id)
     return PlainTextResponse(report, media_type="text/markdown; charset=utf-8")
+
+
+@router.get("/{task_id}/diff", response_class=PlainTextResponse)
+async def get_diff(task_id: str, request: Request) -> PlainTextResponse:
+    diff = _service(request).get_diff(task_id)
+    return PlainTextResponse(diff, media_type="text/x-diff; charset=utf-8")
+
+
+@router.post("/{task_id}/review", response_model=ApiResponse[TaskData])
+async def review_task(
+    task_id: str,
+    payload: ReviewRequest,
+    request: Request,
+) -> ApiResponse[TaskData]:
+    snapshot = _service(request).review_task(
+        task_id,
+        decision=payload.decision,
+        reviewer=payload.reviewer,
+        comment=payload.comment,
+        reviewed_diff_sha256=payload.reviewed_diff_sha256,
+    )
+    return _response(request, snapshot)

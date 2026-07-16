@@ -30,6 +30,11 @@ class TaskData(BaseModel):
     requirement: str
     acceptance_criteria: list[str]
     status: str
+    schema_version: int = 1
+    legacy: bool = False
+    history_warning: str | None = None
+    machine_status: str | None = None
+    review_status: str = "pending"
     phase: str | None = None
     thread_id: str | None = None
     turn_count: int = 0
@@ -41,6 +46,15 @@ class TaskData(BaseModel):
     updated_at: str = ""
     finished_at: str | None = None
     report_url: str | None = None
+    diff_url: str | None = None
+    workspace: dict[str, Any] = Field(default_factory=dict)
+    permissions: dict[str, Any] = Field(default_factory=dict)
+    audit_summary: dict[str, Any] = Field(default_factory=dict)
+    changed_files: list[dict[str, Any]] = Field(default_factory=list)
+    codex_responses: list[dict[str, Any]] = Field(default_factory=list)
+    final_diff_sha256: str = ""
+    diff_redaction_count: int = 0
+    review: dict[str, Any] | None = None
 
     @classmethod
     def from_snapshot(cls, snapshot: TaskSnapshot) -> "TaskData":

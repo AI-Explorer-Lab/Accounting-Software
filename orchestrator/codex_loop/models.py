@@ -13,6 +13,7 @@ from uuid import uuid4
 
 
 PROJECT_TIMEZONE = timezone(timedelta(hours=8), "UTC+08:00")
+SCHEMA_VERSION = 1
 
 
 def utc_now_iso() -> str:
@@ -45,6 +46,15 @@ class RunStatus(str, Enum):
         return self is not RunStatus.RUNNING
 
 
+class ReviewStatus(str, Enum):
+    """Human review state kept separate from machine execution status."""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    CHANGES_REQUESTED = "changes_requested"
+    REJECTED = "rejected"
+
+
 class RunPhase(str, Enum):
     """Fine-grained checkpoints used to resume without repeating a prompt."""
 
@@ -69,6 +79,84 @@ class JsonModel:
 
 
 @dataclass(slots=True)
+class AuditEvent(JsonModel):
+    """One append-only, ordered fact in ``events.jsonl``."""
+
+    seq: int
+    source: str
+    type: str
+    payload: dict[str, Any] = field(default_factory=dict)
+    turn_number: int | None = None
+    round_number: int | None = None
+    redacted: bool = False
+    timestamp: str = field(default_factory=utc_now_iso)
+    schema_version: int = SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "seq": self.seq,
+            "timestamp": self.timestamp,
+            "source": self.source,
+            "type": self.type,
+            "turn_number": self.turn_number,
+            "round_number": self.round_number,
+            "payload": dict(self.payload),
+            "redacted": self.redacted,
+        }
+
+
+@dataclass(slots=True)
+class ReviewRecord(JsonModel):
+    """Immutable local human decision bound to one exact diff."""
+
+    task_id: str
+    decision: ReviewStatus
+    reviewer: str
+    comment: str
+    machine_status: RunStatus
+    reviewed_diff_sha256: str
+    reviewed_at: str = field(default_factory=utc_now_iso)
+    schema_version: int = SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if self.decision is ReviewStatus.PENDING:
+            raise ValueError("review decision cannot be pending")
+        self.reviewer = str(self.reviewer).strip()
+        self.comment = str(self.comment).strip()
+        self.reviewed_diff_sha256 = str(self.reviewed_diff_sha256).strip()
+        if not self.reviewer:
+            raise ValueError("reviewer must be a non-empty string")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.reviewed_diff_sha256):
+            raise ValueError("reviewed_diff_sha256 must be a lowercase SHA-256")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "task_id": self.task_id,
+            "decision": self.decision.value,
+            "reviewer": self.reviewer,
+            "comment": self.comment,
+            "machine_status": self.machine_status.value,
+            "reviewed_diff_sha256": self.reviewed_diff_sha256,
+            "reviewed_at": self.reviewed_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ReviewRecord":
+        return cls(
+            task_id=str(data["task_id"]),
+            decision=ReviewStatus(str(data["decision"])),
+            reviewer=str(data.get("reviewer", "")),
+            comment=str(data.get("comment", "")),
+            machine_status=RunStatus(str(data["machine_status"])),
+            reviewed_diff_sha256=str(data.get("reviewed_diff_sha256", "")),
+            reviewed_at=str(data.get("reviewed_at") or utc_now_iso()),
+            schema_version=int(data.get("schema_version", SCHEMA_VERSION)),
+        )
+
+
+@dataclass(slots=True)
 class TaskSpec(JsonModel):
     """One feature request handled by one Codex thread."""
 
@@ -76,6 +164,7 @@ class TaskSpec(JsonModel):
     acceptance_criteria: list[str]
     task_id: str = field(default_factory=generate_task_id)
     created_at: str = field(default_factory=utc_now_iso)
+    schema_version: int = SCHEMA_VERSION
 
     _TASK_ID_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         r"^[A-Za-z0-9][A-Za-z0-9._-]{0,126}[A-Za-z0-9]$|^[A-Za-z0-9]$"
@@ -112,6 +201,7 @@ class TaskSpec(JsonModel):
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": self.schema_version,
             "task_id": self.task_id,
             "requirement": self.requirement,
             "acceptance_criteria": list(self.acceptance_criteria),
@@ -129,6 +219,7 @@ class TaskSpec(JsonModel):
             requirement=str(data.get("requirement", "")),
             acceptance_criteria=list(criteria),
             created_at=str(data.get("created_at") or utc_now_iso()),
+            schema_version=int(data.get("schema_version", SCHEMA_VERSION)),
         )
 
     @classmethod
@@ -155,6 +246,7 @@ class CommandResult(JsonModel):
     timed_out: bool = False
     infrastructure_error: str | None = None
     log_path: str | None = None
+    log_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.command, (str, bytes)) or not self.command:
@@ -163,6 +255,8 @@ class CommandResult(JsonModel):
         self.cwd = str(self.cwd)
         if self.log_path is not None:
             self.log_path = str(self.log_path)
+        if self.log_sha256 is not None:
+            self.log_sha256 = str(self.log_sha256)
         self.duration_seconds = max(0.0, float(self.duration_seconds))
         if self.exit_code is not None:
             self.exit_code = int(self.exit_code)
@@ -192,7 +286,14 @@ class CommandResult(JsonModel):
             "timed_out": self.timed_out,
             "infrastructure_error": self.infrastructure_error,
             "log_path": self.log_path,
+            "log_sha256": self.log_sha256,
         }
+
+    def metadata_dict(self) -> dict[str, Any]:
+        data = self.to_dict()
+        data.pop("stdout", None)
+        data.pop("stderr", None)
+        return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "CommandResult":
@@ -218,6 +319,11 @@ class CommandResult(JsonModel):
             ),
             log_path=(
                 None if data.get("log_path") is None else str(data["log_path"])
+            ),
+            log_sha256=(
+                None
+                if data.get("log_sha256") is None
+                else str(data["log_sha256"])
             ),
         )
 
@@ -257,11 +363,16 @@ class ValidationRound(JsonModel):
             if result.log_path is not None
         ]
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, include_output: bool = True) -> dict[str, Any]:
+        serialize = (
+            (lambda result: result.to_dict())
+            if include_output
+            else (lambda result: result.metadata_dict())
+        )
         return {
             "round_number": self.round_number,
-            "targeted_results": [result.to_dict() for result in self.targeted_results],
-            "full_results": [result.to_dict() for result in self.full_results],
+            "targeted_results": [serialize(result) for result in self.targeted_results],
+            "full_results": [serialize(result) for result in self.full_results],
             "passed": self.passed,
             "stage": self.stage,
             "started_at": self.started_at,
@@ -302,6 +413,17 @@ class RunState(JsonModel):
 
     task_id: str
     repo_root: str
+    schema_version: int = SCHEMA_VERSION
+    control_repo_root: str = ""
+    base_ref: str = "HEAD"
+    base_commit: str = ""
+    task_branch: str = ""
+    worktree_relative_path: str = ""
+    source_worktree_was_dirty: bool = False
+    permission_verified: bool = False
+    review_status: ReviewStatus = ReviewStatus.PENDING
+    last_diff_sha256: str = ""
+    diff_redaction_count: int = 0
     status: RunStatus = RunStatus.RUNNING
     phase: RunPhase = RunPhase.INITIALIZED
     thread_id: str | None = None
@@ -376,10 +498,21 @@ class RunState(JsonModel):
         self.finished_at = utc_now_iso()
         self.touch()
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, include_output: bool = True) -> dict[str, Any]:
         return {
+            "schema_version": self.schema_version,
             "task_id": self.task_id,
             "repo_root": self.repo_root,
+            "control_repo_root": self.control_repo_root,
+            "base_ref": self.base_ref,
+            "base_commit": self.base_commit,
+            "task_branch": self.task_branch,
+            "worktree_relative_path": self.worktree_relative_path,
+            "source_worktree_was_dirty": self.source_worktree_was_dirty,
+            "permission_verified": self.permission_verified,
+            "review_status": self.review_status.value,
+            "last_diff_sha256": self.last_diff_sha256,
+            "diff_redaction_count": self.diff_redaction_count,
             "status": self.status.value,
             "phase": self.phase.value,
             "thread_id": self.thread_id,
@@ -390,7 +523,10 @@ class RunState(JsonModel):
             ),
             "failure_count": self.failure_count,
             "turn_count": self.turn_count,
-            "rounds": [validation_round.to_dict() for validation_round in self.rounds],
+            "rounds": [
+                validation_round.to_dict(include_output=include_output)
+                for validation_round in self.rounds
+            ],
             "baseline_test_hashes": dict(self.baseline_test_hashes),
             "protected_test_paths": sorted(set(self.protected_test_paths)),
             "baseline_git_status": self.baseline_git_status,
@@ -408,6 +544,21 @@ class RunState(JsonModel):
         return cls(
             task_id=str(data["task_id"]),
             repo_root=str(data["repo_root"]),
+            schema_version=int(data.get("schema_version", 0)),
+            control_repo_root=str(data.get("control_repo_root", "")),
+            base_ref=str(data.get("base_ref", "HEAD")),
+            base_commit=str(data.get("base_commit", "")),
+            task_branch=str(data.get("task_branch", "")),
+            worktree_relative_path=str(data.get("worktree_relative_path", "")),
+            source_worktree_was_dirty=bool(
+                data.get("source_worktree_was_dirty", False)
+            ),
+            permission_verified=bool(data.get("permission_verified", False)),
+            review_status=ReviewStatus(
+                str(data.get("review_status", ReviewStatus.PENDING.value))
+            ),
+            last_diff_sha256=str(data.get("last_diff_sha256", "")),
+            diff_redaction_count=int(data.get("diff_redaction_count", 0)),
             status=RunStatus(str(data.get("status", RunStatus.RUNNING.value))),
             phase=RunPhase(str(data.get("phase", RunPhase.INITIALIZED.value))),
             thread_id=(
@@ -461,6 +612,13 @@ class RunResult(JsonModel):
     rounds: list[ValidationRound]
     baseline_git_status: str
     final_git_summary: str
+    schema_version: int = SCHEMA_VERSION
+    review_status: ReviewStatus = ReviewStatus.PENDING
+    workspace: dict[str, Any] = field(default_factory=dict)
+    permissions: dict[str, Any] = field(default_factory=dict)
+    artifacts: dict[str, str] = field(default_factory=dict)
+    final_diff_sha256: str = ""
+    diff_redaction_count: int = 0
     log_paths: list[str] = field(default_factory=list)
     infrastructure_error: str | None = None
     started_at: str = ""
@@ -493,6 +651,26 @@ class RunResult(JsonModel):
             rounds=list(state.rounds),
             baseline_git_status=state.baseline_git_status,
             final_git_summary=state.final_git_summary,
+            schema_version=state.schema_version,
+            review_status=state.review_status,
+            workspace={
+                "base_ref": state.base_ref,
+                "base_commit": state.base_commit,
+                "task_branch": state.task_branch,
+                "worktree": state.worktree_relative_path,
+                "source_worktree_was_dirty": state.source_worktree_was_dirty,
+            },
+            permissions={"verified": state.permission_verified},
+            artifacts={
+                "manifest": "manifest.json",
+                "permissions": "permissions.json",
+                "events": "events.jsonl",
+                "files": "changes/files.json",
+                "diff": "changes/final.diff",
+                "report": "report.md",
+            },
+            final_diff_sha256=state.last_diff_sha256,
+            diff_redaction_count=state.diff_redaction_count,
             log_paths=log_paths,
             infrastructure_error=state.infrastructure_error,
             started_at=state.started_at,
@@ -501,17 +679,37 @@ class RunResult(JsonModel):
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "schema_version": self.schema_version,
             "task_id": self.task_id,
             "status": self.status.value,
+            "machine_status": self.status.value,
+            "review_status": self.review_status.value,
             "requirement": self.requirement,
             "acceptance_criteria": list(self.acceptance_criteria),
             "repo_root": self.repo_root,
             "thread_id": self.thread_id,
             "turn_count": self.turn_count,
+            "retry_count": max(0, self.turn_count - 1),
             "failure_count": self.failure_count,
-            "rounds": [validation_round.to_dict() for validation_round in self.rounds],
+            "validation": {
+                "passed": bool(
+                    self.status is RunStatus.SUCCESS
+                    and self.rounds
+                    and self.rounds[-1].passed
+                ),
+                "rounds": len(self.rounds),
+            },
+            "rounds": [
+                validation_round.to_dict(include_output=False)
+                for validation_round in self.rounds
+            ],
             "baseline_git_status": self.baseline_git_status,
             "final_git_summary": self.final_git_summary,
+            "workspace": dict(self.workspace),
+            "permissions": dict(self.permissions),
+            "artifacts": dict(self.artifacts),
+            "final_diff_sha256": self.final_diff_sha256,
+            "diff_redaction_count": self.diff_redaction_count,
             "log_paths": list(self.log_paths),
             "infrastructure_error": self.infrastructure_error,
             "started_at": self.started_at,
@@ -522,7 +720,7 @@ class RunResult(JsonModel):
     def from_dict(cls, data: Mapping[str, Any]) -> "RunResult":
         return cls(
             task_id=str(data["task_id"]),
-            status=RunStatus(str(data["status"])),
+            status=RunStatus(str(data.get("machine_status", data.get("status")))),
             requirement=str(data.get("requirement", "")),
             acceptance_criteria=[
                 str(item) for item in data.get("acceptance_criteria", [])
@@ -538,6 +736,23 @@ class RunResult(JsonModel):
             ],
             baseline_git_status=str(data.get("baseline_git_status", "")),
             final_git_summary=str(data.get("final_git_summary", "")),
+            schema_version=int(data.get("schema_version", 0)),
+            review_status=ReviewStatus(
+                str(data.get("review_status", ReviewStatus.PENDING.value))
+            ),
+            workspace={
+                str(key): value for key, value in dict(data.get("workspace", {})).items()
+            },
+            permissions={
+                str(key): value
+                for key, value in dict(data.get("permissions", {})).items()
+            },
+            artifacts={
+                str(key): str(value)
+                for key, value in dict(data.get("artifacts", {})).items()
+            },
+            final_diff_sha256=str(data.get("final_diff_sha256", "")),
+            diff_redaction_count=int(data.get("diff_redaction_count", 0)),
             log_paths=[str(path) for path in data.get("log_paths", [])],
             infrastructure_error=(
                 None
@@ -550,6 +765,7 @@ class RunResult(JsonModel):
 
 
 __all__ = [
+    "AuditEvent",
     "CommandResult",
     "InfrastructureError",
     "PromptKind",
@@ -557,6 +773,9 @@ __all__ = [
     "RunResult",
     "RunState",
     "RunStatus",
+    "ReviewRecord",
+    "ReviewStatus",
+    "SCHEMA_VERSION",
     "TaskSpec",
     "ValidationRound",
     "generate_task_id",

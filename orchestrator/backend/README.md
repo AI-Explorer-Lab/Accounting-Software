@@ -1,6 +1,6 @@
 # Codex Orchestrator API
 
-这个 FastAPI 服务把网页请求交给现有 `orchestrator.codex_loop`。它不创建第二套任务数据，也不修改核心编排逻辑；任务、状态和报告仍保存在仓库根目录的 `.codex-orchestrator/`。
+这个 FastAPI 服务把网页请求交给现有 `orchestrator.codex_loop`。它不创建第二套任务数据；任务、隔离信息、权限、事件、diff、审查和报告都来自仓库根目录的 `.codex-orchestrator/`。CLI 与 API 复用同一个人工审查服务。
 
 ## 安装
 
@@ -35,6 +35,8 @@ conda run -n account uvicorn orchestrator.backend.main:app \
 | `GET` | `/api/tasks/{task_id}` | 查询阶段、验证轮次和最终状态 |
 | `POST` | `/api/tasks/{task_id}/resume` | 后端中断后恢复原任务和原 thread |
 | `GET` | `/api/tasks/{task_id}/report` | 读取完成后的 `report.md` |
+| `GET` | `/api/tasks/{task_id}/diff` | 只读获取脱敏后的最终 diff |
+| `POST` | `/api/tasks/{task_id}/review` | 提交一次人工结论并绑定 diff SHA-256 |
 
 创建任务示例：
 
@@ -46,6 +48,8 @@ curl -X POST http://127.0.0.1:8100/api/tasks \
 
 API 在单工作线程中执行 Codex，因此 HTTP 请求不会等待开发和测试结束。同一时间只能有一个活动任务；已有未完成任务时，先使用恢复接口，不要创建新任务。
 
+审查请求包含 `decision`、`reviewer`、`comment` 和 `reviewed_diff_sha256`。只允许 `approved`、`changes_requested`、`rejected`；任务未结束、diff 已变化、diff 含疑似密钥、旧任务或已有结论时返回冲突。`reviewer` 是本地声明身份，不是登录认证身份。
+
 ## 测试
 
 后端测试使用假的 workflow 和临时任务目录，不会真实调用 Codex：
@@ -55,4 +59,4 @@ env PYTHONPYCACHEPREFIX=/private/tmp/accounting-pycache \
   conda run -n account pytest -q orchestrator/backend/tests
 ```
 
-真实运行生成的脱敏日志、`result.json` 和 `report.md` 位于 `.codex-orchestrator/runs/<task-id>/`。
+没有 schema version 的旧任务只读展示，并明确标记历史信息不完整；不能恢复或提交审查。系统不会自动合并或部署。

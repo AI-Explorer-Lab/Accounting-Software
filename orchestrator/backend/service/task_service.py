@@ -5,6 +5,7 @@ from threading import RLock
 from typing import Callable
 
 from orchestrator.codex_loop.models import TaskSpec
+from orchestrator.codex_loop.review import ReviewError, ReviewService
 from orchestrator.codex_loop.state import redact_sensitive_text
 from orchestrator.codex_loop.workflow import OrchestrationWorkflow
 
@@ -12,6 +13,7 @@ from ..constant.enums import ApiTaskStatus
 from ..domain.models import TaskSnapshot
 from ..exceptions.business_exception import (
     InvalidTaskIdError,
+    ReviewConflictError,
     TaskConflictError,
     TaskNotFoundError,
     TaskNotReadyError,
@@ -34,6 +36,7 @@ class TaskService:
         executor: TaskExecutor | None = None,
         mapper: FileRunMapper | None = None,
         workflow_factory: WorkflowFactory | None = None,
+        review_service: ReviewService | None = None,
     ) -> None:
         self.repo_root = Path(repo_root).expanduser().resolve()
         self.executor = executor or TaskExecutor()
@@ -44,6 +47,7 @@ class TaskService:
                 validation_timeout_seconds=validation_timeout_seconds,
             )
         )
+        self.review_service = review_service or ReviewService(self.repo_root)
         self._submission_lock = RLock()
 
     def start_task(
@@ -123,6 +127,43 @@ class TaskService:
         if report is None:
             raise TaskNotReadyError(task_id)
         return report
+
+    def get_diff(self, task_id: str) -> str:
+        self._validate_task_id(task_id)
+        task = self.mapper.load_task(task_id)
+        if task is None:
+            raise TaskNotFoundError(task_id)
+        diff = self.mapper.load_diff(task_id)
+        if diff is None:
+            raise TaskNotReadyError(task_id)
+        return diff
+
+    def review_task(
+        self,
+        task_id: str,
+        *,
+        decision: str,
+        reviewer: str,
+        comment: str,
+        reviewed_diff_sha256: str,
+    ) -> TaskSnapshot:
+        self._validate_task_id(task_id)
+        if self.mapper.load_task(task_id) is None:
+            raise TaskNotFoundError(task_id)
+        try:
+            self.review_service.record(
+                task_id,
+                decision=decision,
+                reviewer=reviewer,
+                comment=comment,
+                reviewed_diff_sha256=reviewed_diff_sha256,
+            )
+        except ReviewError as exc:
+            raise ReviewConflictError(str(exc)) from exc
+        snapshot = self.mapper.load_snapshot(task_id)
+        if snapshot is None:  # pragma: no cover - guarded by persisted task/state
+            raise TaskNotFoundError(task_id)
+        return snapshot
 
     def close(self, *, wait: bool = False) -> None:
         self.executor.shutdown(wait=wait)

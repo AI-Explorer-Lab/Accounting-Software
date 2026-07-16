@@ -43,6 +43,7 @@ CONDA_PREFLIGHT_COMMAND: tuple[str, ...] = (
     "-c",
     "import pytest",
 )
+NPM_PREFLIGHT_COMMAND: tuple[str, ...] = ("npm", "--version")
 
 
 class CommandRunner(Protocol):
@@ -65,8 +66,24 @@ class CommandRunner(Protocol):
 class SubprocessCommandRunner:
     """Production command runner using argument arrays and ``shell=False``."""
 
+    def __init__(
+        self,
+        *,
+        environment: Mapping[str, str] | None = None,
+        command_prefix: Sequence[str] = (),
+    ) -> None:
+        self.environment = (
+            None
+            if environment is None
+            else {str(name): str(value) for name, value in environment.items()}
+        )
+        self.command_prefix = tuple(str(part) for part in command_prefix)
+
     def ensure_available(self, executables: Sequence[str]) -> None:
-        missing = sorted({name for name in executables if shutil.which(name) is None})
+        path = None if self.environment is None else self.environment.get("PATH")
+        missing = sorted(
+            {name for name in executables if shutil.which(name, path=path) is None}
+        )
         if missing:
             joined = ", ".join(missing)
             raise InfrastructureError(f"Required executable not found: {joined}")
@@ -80,18 +97,20 @@ class SubprocessCommandRunner:
         timeout_seconds: float,
     ) -> CommandResult:
         args = [str(part) for part in command]
+        execution_args = [*self.command_prefix, *args]
         started_at = _utc_now()
         started = time.monotonic()
 
         try:
             completed = subprocess.run(
-                args,
+                execution_args,
                 cwd=cwd,
                 capture_output=True,
                 text=True,
                 timeout=timeout_seconds,
                 check=False,
                 shell=False,
+                env=self.environment,
             )
         except subprocess.TimeoutExpired as exc:
             return _make_command_result(
@@ -120,6 +139,9 @@ class SubprocessCommandRunner:
                 infrastructure_error=message,
             )
 
+        infrastructure_error = _required_runtime_denial(
+            completed.stdout, completed.stderr
+        )
         return _make_command_result(
             command=args,
             cwd=cwd,
@@ -130,6 +152,7 @@ class SubprocessCommandRunner:
             stdout=completed.stdout,
             stderr=completed.stderr,
             timed_out=False,
+            infrastructure_error=infrastructure_error,
         )
 
 
@@ -141,6 +164,8 @@ class ValidationRunner:
         project_root: str | Path,
         *,
         runner: CommandRunner | None = None,
+        environment: Mapping[str, str] | None = None,
+        command_prefix: Sequence[str] = (),
         timeout_seconds: float = 900.0,
         baseline_hashes: Mapping[str, str] | None = None,
         protected_test_paths: Sequence[str] | None = None,
@@ -152,7 +177,10 @@ class ValidationRunner:
             raise ValueError("timeout_seconds must be greater than zero")
 
         self.project_root = root
-        self.runner = runner or SubprocessCommandRunner()
+        self.runner = runner or SubprocessCommandRunner(
+            environment=environment,
+            command_prefix=command_prefix,
+        )
         self.timeout_seconds = timeout_seconds
         self._baseline = (
             self._snapshot_test_files()
@@ -250,22 +278,28 @@ class ValidationRunner:
                 + ", ".join(missing_frontend_tools)
             )
 
-        environment_probe = self.runner.run(
-            CONDA_PREFLIGHT_COMMAND,
-            cwd=self.project_root,
-            stage="preflight",
-            timeout_seconds=min(self.timeout_seconds, 60.0),
+        probes = (
+            (
+                CONDA_PREFLIGHT_COMMAND,
+                "Conda environment 'account' or pytest is unavailable",
+            ),
+            (NPM_PREFLIGHT_COMMAND, "Node/npm runtime is unavailable"),
         )
-        if not environment_probe.passed:
-            if environment_probe.infrastructure_error:
-                reason = environment_probe.infrastructure_error
-            elif environment_probe.timed_out:
-                reason = "probe timed out"
-            else:
-                reason = f"probe exited with code {environment_probe.exit_code}"
-            raise InfrastructureError(
-                "Conda environment 'account' or pytest is unavailable: " + reason
+        for command, unavailable_message in probes:
+            environment_probe = self.runner.run(
+                command,
+                cwd=self.project_root,
+                stage="preflight",
+                timeout_seconds=min(self.timeout_seconds, 60.0),
             )
+            if not environment_probe.passed:
+                if environment_probe.infrastructure_error:
+                    reason = environment_probe.infrastructure_error
+                elif environment_probe.timed_out:
+                    reason = "probe timed out"
+                else:
+                    reason = f"probe exited with code {environment_probe.exit_code}"
+                raise InfrastructureError(f"{unavailable_message}: {reason}")
         self._preflight_complete = True
 
     def discover_changed_tests(self) -> tuple[str, ...]:
@@ -555,7 +589,9 @@ def _failure_summary(stage: str, results: Sequence[CommandResult]) -> str:
                 if result.timed_out
                 else f"exit code {result.exit_code}"
             )
-        failures.append(f"{command}: {reason}")
+        output = (result.stderr.strip() or result.stdout.strip())[:2_000]
+        detail = f"; output: {output}" if output else ""
+        failures.append(f"{command}: {reason}{detail}")
     return f"{stage} validation failed: " + "; ".join(failures)
 
 
@@ -597,10 +633,34 @@ def _coerce_output(value: str | bytes | None) -> str:
     return value
 
 
+def _required_runtime_denial(stdout: str, stderr: str) -> str | None:
+    normalized = f"{stdout}\n{stderr}".casefold()
+    denied = (
+        "operation not permitted" in normalized
+        or "permission denied" in normalized
+        or "kill eperm" in normalized
+    )
+    required_paths = (
+        "node_modules/.cache",
+        "node_modules/.tmp",
+        "node_modules/.vite",
+        "node_modules/.vite-temp",
+        "npm-cli.js",
+        "sandbox-exec: sandbox_apply",
+    )
+    if denied and (
+        "kill eperm" in normalized
+        or any(path in normalized for path in required_paths)
+    ):
+        return "Validation sandbox denied a required local runtime or cache path"
+    return None
+
+
 __all__ = [
     "CommandRunner",
     "CONDA_PREFLIGHT_COMMAND",
     "FULL_VALIDATION_COMMANDS",
+    "NPM_PREFLIGHT_COMMAND",
     "InfrastructureError",
     "SubprocessCommandRunner",
     "ValidationRunner",

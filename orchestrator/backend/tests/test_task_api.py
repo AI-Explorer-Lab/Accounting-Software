@@ -30,6 +30,31 @@ class FakeTaskService:
     def get_report(self, task_id: str) -> str:
         return f"# Report for {task_id}\n"
 
+    def get_diff(self, task_id: str) -> str:
+        return f"diff --git a/{task_id} b/{task_id}\n"
+
+    def review_task(
+        self,
+        task_id: str,
+        *,
+        decision: str,
+        reviewer: str,
+        comment: str,
+        reviewed_diff_sha256: str,
+    ) -> TaskSnapshot:
+        snapshot = _snapshot(task_id=task_id, status="success")
+        values = snapshot.to_dict()
+        values.update(
+            review_status=decision,
+            review={
+                "decision": decision,
+                "reviewer": reviewer,
+                "comment": comment,
+                "reviewed_diff_sha256": reviewed_diff_sha256,
+            },
+        )
+        return TaskSnapshot(**values)
+
 
 class ConflictingTaskService(FakeTaskService):
     def start_task(
@@ -100,6 +125,7 @@ def test_get_resume_and_report() -> None:
         fetched = client.get("/api/tasks/task-9")
         resumed = client.post("/api/tasks/task-9/resume")
         report = client.get("/api/tasks/task-9/report")
+        diff = client.get("/api/tasks/task-9/diff")
 
     assert fetched.status_code == 200
     assert fetched.json()["data"]["status"] == "running"
@@ -108,6 +134,26 @@ def test_get_resume_and_report() -> None:
     assert report.status_code == 200
     assert report.headers["content-type"].startswith("text/markdown")
     assert report.text == "# Report for task-9\n"
+    assert diff.status_code == 200
+    assert diff.headers["content-type"].startswith("text/x-diff")
+
+
+def test_review_endpoint_returns_the_recorded_decision() -> None:
+    sha = "a" * 64
+    with _client(FakeTaskService()) as client:
+        response = client.post(
+            "/api/tasks/task-9/review",
+            json={
+                "decision": "approved",
+                "reviewer": "Local Reviewer",
+                "comment": "Checked.",
+                "reviewed_diff_sha256": sha,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["review_status"] == "approved"
+    assert response.json()["data"]["review"]["reviewed_diff_sha256"] == sha
 
 
 def test_conflict_is_returned_as_structured_409() -> None:
