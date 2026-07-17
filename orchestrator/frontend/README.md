@@ -11,7 +11,7 @@ npm ci --prefix orchestrator/frontend
 npm --prefix orchestrator/frontend run dev
 ```
 
-页面默认地址是 `http://127.0.0.1:5100`。开发服务器会把 `/api` 请求代理到 `http://127.0.0.1:8100`，因此需要同时启动 `orchestrator/backend`。
+页面默认地址是 `http://127.0.0.1:8100`。通过 `orchestrator/start.sh` 启动时，开发服务器会把 `/api` 请求代理到仅供本机进程通信的后端端口 `18100`。
 
 页面每两秒查询一次活动任务，机器流程完成后停止轮询并读取报告与 diff。自动测试通过仍显示“待人工审查”；审查人填写本地声明身份和说明后，可选择批准、要求修改或驳回。结论只能提交一次，并与页面所示 diff SHA-256 绑定。
 

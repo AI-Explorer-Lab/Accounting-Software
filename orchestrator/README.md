@@ -66,7 +66,8 @@ python -m orchestrator.codex_loop review \
 ./orchestrator/start.sh
 ```
 
-页面地址为 `http://127.0.0.1:5100`，API 地址为 `http://127.0.0.1:8100`。
+页面和 API 统一从 `http://127.0.0.1:8100` 访问。脚本会把 `/api` 转发到
+仅供本机进程通信的后端端口 `18100`。
 
 ## 状态含义
 

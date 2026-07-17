@@ -2,11 +2,11 @@
 
 set -Eeuo pipefail
 
-ORCHESTRATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${ORCHESTRATOR_DIR}/.." && pwd)"
-FRONTEND_DIR="${ORCHESTRATOR_DIR}/frontend"
-PUBLIC_PORT=8100
-BACKEND_PORT=18100
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FRONTEND_DIR="${REPO_ROOT}/frontend"
+BACKEND_DIR="${REPO_ROOT}/backend"
+PUBLIC_PORT=8101
+BACKEND_PORT=18101
 BACKEND_PID=""
 FRONTEND_PID=""
 
@@ -20,7 +20,7 @@ cleanup() {
   trap - EXIT INT TERM
 
   if [[ -n "${BACKEND_PID}${FRONTEND_PID}" ]]; then
-    printf '\n正在关闭 Orchestrator 前后端...\n'
+    printf '\n正在关闭会计系统前后端...\n'
   fi
 
   for pid in "${BACKEND_PID}" "${FRONTEND_PID}"; do
@@ -47,31 +47,30 @@ ACCOUNT_PREFIX="$(
 ACCOUNT_PYTHON="${ACCOUNT_PREFIX}/bin/python"
 
 [[ -x "${ACCOUNT_PYTHON}" ]] || fail "account 环境中没有可执行的 Python。"
-"${ACCOUNT_PYTHON}" -c 'import dynaconf, fastapi, openai_codex, pydantic, uvicorn' \
+"${ACCOUNT_PYTHON}" -c 'import dynaconf, fastapi, sqlalchemy, uvicorn' \
   >/dev/null 2>&1 \
-  || fail "account 环境缺少依赖，请先安装 orchestrator/requirements.txt 和 orchestrator/backend/requirements.txt。"
-
-[[ -x "${ORCHESTRATOR_DIR}/node_modules/.bin/codex" ]] \
-  || fail "Codex runtime 未安装，请运行 npm ci --prefix orchestrator。"
+  || fail "account 环境缺少后端依赖，请先安装 backend/requirements.txt。"
 [[ -x "${FRONTEND_DIR}/node_modules/.bin/vite" ]] \
-  || fail "编排器前端依赖未安装，请运行 npm ci --prefix orchestrator/frontend。"
+  || fail "前端依赖未安装，请运行 npm ci --prefix frontend。"
 
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-cd "${REPO_ROOT}"
-
-printf '正在启动 Orchestrator：http://127.0.0.1:%s\n' "${PUBLIC_PORT}"
-"${ACCOUNT_PYTHON}" -m uvicorn orchestrator.backend.main:app \
-  --host 127.0.0.1 \
-  --port "${BACKEND_PORT}" &
+printf '正在启动会计系统：http://127.0.0.1:%s\n' "${PUBLIC_PORT}"
+(
+  cd "${BACKEND_DIR}"
+  exec "${ACCOUNT_PYTHON}" -m uvicorn main:app \
+    --host 127.0.0.1 \
+    --port "${BACKEND_PORT}"
+) &
 BACKEND_PID=$!
 
 (
   cd "${FRONTEND_DIR}"
-  ORCHESTRATOR_BACKEND_PORT="${BACKEND_PORT}" \
+  ACCOUNT_BACKEND_PORT="${BACKEND_PORT}" \
     exec ./node_modules/.bin/vite \
+      --host 127.0.0.1 \
       --port "${PUBLIC_PORT}" \
       --strictPort
 ) &
@@ -85,7 +84,7 @@ while true; do
     wait "${BACKEND_PID}"
     service_status=$?
     set -e
-    printf 'Orchestrator 后端已退出（状态码 %s）。\n' "${service_status}" >&2
+    printf '后端已退出（状态码 %s）。\n' "${service_status}" >&2
     exit "${service_status}"
   fi
 
@@ -94,7 +93,7 @@ while true; do
     wait "${FRONTEND_PID}"
     service_status=$?
     set -e
-    printf 'Orchestrator 前端已退出（状态码 %s）。\n' "${service_status}" >&2
+    printf '前端已退出（状态码 %s）。\n' "${service_status}" >&2
     exit "${service_status}"
   fi
 

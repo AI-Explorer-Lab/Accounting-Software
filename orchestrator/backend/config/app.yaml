@@ -6,8 +6,8 @@ default:
     host: 127.0.0.1
     port: 8100
     cors_origins:
-      - http://127.0.0.1:5100
-      - http://localhost:5100
+      - http://127.0.0.1:8100
+      - http://localhost:8100
   agent:
     repo_root: null
     validation_timeout_seconds: 900

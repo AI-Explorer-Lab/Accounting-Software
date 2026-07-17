@@ -21,10 +21,12 @@ npm ci --prefix orchestrator
 
 ```bash
 conda run -n account uvicorn orchestrator.backend.main:app \
-  --reload --host 127.0.0.1 --port 8100
+  --reload --host 127.0.0.1 --port 18100
 ```
 
-默认配置位于 `config/app.yaml`。服务只监听本机地址，并只允许 `http://127.0.0.1:5100` 和 `http://localhost:5100` 跨域访问。
+通过 `orchestrator/start.sh` 启动时，页面和 API 统一从
+`http://127.0.0.1:8100` 访问；`18100` 仅用于 Vite 与 FastAPI 之间的本机通信。
+默认配置位于 `config/app.yaml`，并只允许来自 8100 端口的本机页面跨域访问。
 
 ## 接口
 

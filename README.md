@@ -3,28 +3,25 @@
 The project has separate backend and frontend applications. Commands must be
 run in the corresponding directory, or with the directory prefix shown below.
 
-## Start the database and backend
+## Start the application
 
 ```bash
 docker compose up -d database
-conda activate account
-cd backend
-uvicorn main:app --reload
+./start.sh
 ```
 
-The backend runs at `http://127.0.0.1:8000`.
+Open `http://127.0.0.1:8101`. The script starts the Vue frontend and FastAPI
+backend together, routes `/api` to the backend, and stops both processes when
+you press `Ctrl+C`. The backend uses the internal loopback port `18101` so the
+two processes do not compete for the public port.
 
-## Start the frontend
-
-Open another terminal at the repository root and run:
+To run the two processes separately, use the same internal backend port:
 
 ```bash
-npm --prefix frontend run dev
+conda run -n account uvicorn --app-dir backend main:app \
+  --host 127.0.0.1 --port 18101
+ACCOUNT_BACKEND_PORT=18101 npm --prefix frontend run dev
 ```
-
-The frontend runs at `http://127.0.0.1:5173`. Running `npm run dev` directly
-from the repository root does not work because `package.json` belongs to the
-`frontend` directory.
 
 ## Run all tests
 
@@ -123,25 +120,26 @@ Start both services from the repository root. The script uses Python from the
 ./orchestrator/start.sh
 ```
 
-To run the services separately, start the API from the repository root:
+To run the services separately, start the internal API from the repository root:
 
 ```bash
 conda run -n account uvicorn orchestrator.backend.main:app \
-  --reload --host 127.0.0.1 --port 8100
+  --reload --host 127.0.0.1 --port 18100
 ```
 
 Then start the page in another terminal:
 
 ```bash
-npm --prefix orchestrator/frontend run dev
+ORCHESTRATOR_BACKEND_PORT=18100 \
+  npm --prefix orchestrator/frontend run dev
 ```
 
-Open `http://127.0.0.1:5100`. The page submits a requirement and one or more
+Open `http://127.0.0.1:8100`. The page submits a requirement and one or more
 acceptance criteria, polls the task every two seconds, and displays workspace,
 permissions, validation, visible Codex replies, changed files and the final
-diff. It also records the same immutable review decision as the CLI. The API
-listens only on `127.0.0.1:8100` by default and reuses the Codex login on this
-computer.
+diff. It also records the same immutable review decision as the CLI. Requests
+under `/api` are forwarded to the internal backend port `18100`, and the backend
+reuses the Codex login on this computer.
 
 Runs created before schema version 1 remain readable, but are labelled as
 incomplete `legacy_v0` history. Missing isolation, permission, prompt, diff or
