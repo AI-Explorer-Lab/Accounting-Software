@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 
 from sqlalchemy import CheckConstraint, Date, Enum as SqlEnum, Numeric, String, Text
+from sqlalchemy import case
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
@@ -89,6 +90,70 @@ async def list_records(
         .limit(page_size)
     )
     return list(records_result.scalars().all()), total
+
+
+async def get_monthly_totals(
+    session: AsyncSession,
+    *,
+    start_date: date,
+    end_date: date,
+) -> tuple[Decimal, Decimal, int]:
+    result = await session.execute(
+        select(
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            TransactionEntity.transaction_type
+                            == TransactionType.INCOME,
+                            TransactionEntity.amount,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            TransactionEntity.transaction_type
+                            == TransactionType.EXPENSE,
+                            TransactionEntity.amount,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ),
+            func.count(TransactionEntity.id),
+        ).where(
+            TransactionEntity.transaction_date >= start_date,
+            TransactionEntity.transaction_date < end_date,
+        )
+    )
+    income_total, expense_total, transaction_count = result.one()
+    return Decimal(income_total), Decimal(expense_total), int(transaction_count)
+
+
+async def get_monthly_expenses_by_category(
+    session: AsyncSession,
+    *,
+    start_date: date,
+    end_date: date,
+) -> list[tuple[str, Decimal]]:
+    amount_total = func.sum(TransactionEntity.amount).label("amount_total")
+    result = await session.execute(
+        select(TransactionEntity.category, amount_total)
+        .where(
+            TransactionEntity.transaction_type == TransactionType.EXPENSE,
+            TransactionEntity.transaction_date >= start_date,
+            TransactionEntity.transaction_date < end_date,
+        )
+        .group_by(TransactionEntity.category)
+        .order_by(amount_total.desc(), TransactionEntity.category.asc())
+    )
+    return [(category, Decimal(amount)) for category, amount in result.all()]
 
 
 async def delete_by_id(session: AsyncSession, transaction_id: int) -> bool:

@@ -13,6 +13,7 @@ describe('App theme toggle', () => {
       global: {
         stubs: {
           HealthCard: true,
+          MonthlyOverview: true,
           TransactionForm: true,
           TransactionList: true,
         },
@@ -34,5 +35,34 @@ describe('App theme toggle', () => {
     expect(document.documentElement.dataset.theme).toBe('light')
     expect(toggle.text()).toContain('黑暗模式')
     expect(toggle.attributes('aria-pressed')).toBe('false')
+  })
+
+  it('refreshes the monthly overview after creating or deleting a transaction', async () => {
+    const wrapper = mount(App, {
+      global: {
+        stubs: {
+          HealthCard: true,
+          MonthlyOverview: {
+            props: ['refreshKey'],
+            template: '<div data-test="overview">{{ refreshKey }}</div>',
+          },
+          TransactionForm: {
+            emits: ['created'],
+            template: '<button data-test="create" @click="$emit(\'created\')">create</button>',
+          },
+          TransactionList: {
+            props: ['refreshKey'],
+            emits: ['deleted'],
+            template: '<button data-test="delete" @click="$emit(\'deleted\')">{{ refreshKey }}</button>',
+          },
+        },
+      },
+    })
+
+    expect(wrapper.get('[data-test="overview"]').text()).toBe('0')
+    await wrapper.get('[data-test="create"]').trigger('click')
+    expect(wrapper.get('[data-test="overview"]').text()).toBe('1')
+    await wrapper.get('[data-test="delete"]').trigger('click')
+    expect(wrapper.get('[data-test="overview"]').text()).toBe('2')
   })
 })

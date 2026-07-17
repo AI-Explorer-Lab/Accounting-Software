@@ -43,3 +43,18 @@ class TransactionPageData(BaseModel):
 
 class TransactionDeleteData(BaseModel):
     id: int
+
+
+class ExpenseCategoryData(BaseModel):
+    category: str
+    amount: Decimal
+    percentage: Decimal
+
+
+class MonthlyTransactionStatisticsData(BaseModel):
+    month: str
+    income_total: Decimal
+    expense_total: Decimal
+    balance: Decimal
+    transaction_count: int
+    expense_by_category: list[ExpenseCategoryData]

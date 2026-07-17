@@ -19,8 +19,9 @@
       </p>
     </header>
 
+    <MonthlyOverview :refresh-key="transactionRefreshKey" />
     <TransactionForm @created="refreshTransactions" />
-    <TransactionList :refresh-key="transactionRefreshKey" />
+    <TransactionList :refresh-key="transactionRefreshKey" @deleted="refreshTransactions" />
     <HealthCard />
 
     <section class="architecture" aria-labelledby="architecture-title">
@@ -41,6 +42,7 @@
 import { ref } from 'vue'
 
 import HealthCard from './components/HealthCard.vue'
+import MonthlyOverview from './components/MonthlyOverview.vue'
 import TransactionForm from './components/TransactionForm.vue'
 import TransactionList from './components/TransactionList.vue'
 

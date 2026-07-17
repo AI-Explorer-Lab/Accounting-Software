@@ -9,6 +9,8 @@ from database.session import get_session
 from domain.req import TransactionCreateRequest, TransactionListRequest
 from domain.res import (
     ApiResponse,
+    ExpenseCategoryData,
+    MonthlyTransactionStatisticsData,
     TransactionData,
     TransactionDeleteData,
     TransactionPageData,
@@ -18,10 +20,61 @@ from service.transaction_service import (
     execute_create_transaction,
     execute_delete_transaction,
     execute_list_transactions,
+    execute_monthly_statistics,
 )
 
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
+
+
+@router.get(
+    "/statistics/monthly",
+    response_model=ApiResponse[MonthlyTransactionStatisticsData],
+)
+async def get_monthly_statistics(
+    request: Request,
+    month: str = Query(description="Month in YYYY-MM format"),
+    session: AsyncSession = Depends(get_session),
+) -> ApiResponse[MonthlyTransactionStatisticsData]:
+    try:
+        parsed_month = date.fromisoformat(f"{month}-01")
+    except ValueError as exc:
+        raise BusinessException(
+            "month must be a valid month in YYYY-MM format",
+            status_code=422,
+        ) from exc
+    if month != parsed_month.strftime("%Y-%m"):
+        raise BusinessException(
+            "month must be a valid month in YYYY-MM format",
+            status_code=422,
+        )
+
+    income_total, expense_total, balance, transaction_count, expense_by_category = (
+        await execute_monthly_statistics(
+            parsed_month.year,
+            parsed_month.month,
+            session,
+        )
+    )
+    return ApiResponse(
+        data=MonthlyTransactionStatisticsData(
+            month=month,
+            income_total=income_total,
+            expense_total=expense_total,
+            balance=balance,
+            transaction_count=transaction_count,
+            expense_by_category=[
+                ExpenseCategoryData(
+                    category=category,
+                    amount=amount,
+                    percentage=percentage,
+                )
+                for category, amount, percentage in expense_by_category
+            ],
+        ),
+        message="monthly transaction statistics retrieved",
+        request_id=getattr(request.state, "request_id", None),
+    )
 
 
 @router.get("", response_model=ApiResponse[TransactionPageData])
