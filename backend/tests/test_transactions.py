@@ -252,3 +252,87 @@ async def test_delete_transaction_returns_404_when_record_does_not_exist(
 
     assert response.status_code == 404
     assert response.json()["message"] == "transaction not found"
+
+
+@pytest.mark.asyncio
+async def test_monthly_statistics_returns_totals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_monthly_statistics(year, month, _session):
+        assert (year, month) == (2026, 7)
+        return (
+            Decimal("1000.00"), Decimal("250.25"), Decimal("749.75"), 4,
+            [
+                ("Food", Decimal("200.00"), Decimal("79.92")),
+                ("Travel", Decimal("50.25"), Decimal("20.08")),
+            ],
+        )
+
+    monkeypatch.setattr(
+        transaction_api,
+        "execute_monthly_statistics",
+        fake_monthly_statistics,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/transactions/statistics/monthly",
+            params={"month": "2026-07"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "month": "2026-07",
+        "income_total": "1000.00",
+        "expense_total": "250.25",
+        "balance": "749.75",
+        "transaction_count": 4,
+        "expense_by_category": [
+            {"category": "Food", "amount": "200.00", "percentage": "79.92"},
+            {"category": "Travel", "amount": "50.25", "percentage": "20.08"},
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_monthly_statistics_returns_zero_for_empty_month(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_monthly_statistics(_year, _month, _session):
+        return Decimal("0"), Decimal("0"), Decimal("0"), 0, []
+
+    monkeypatch.setattr(
+        transaction_api,
+        "execute_monthly_statistics",
+        fake_monthly_statistics,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/transactions/statistics/monthly",
+            params={"month": "2025-01"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "month": "2025-01",
+        "income_total": "0",
+        "expense_total": "0",
+        "balance": "0",
+        "transaction_count": 0,
+        "expense_by_category": [],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("month", ["2026-7", "2026-13", "July-2026", "2026-07-01"])
+async def test_monthly_statistics_rejects_invalid_month(month: str) -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/api/transactions/statistics/monthly",
+            params={"month": month},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["message"] == "month must be a valid month in YYYY-MM format"

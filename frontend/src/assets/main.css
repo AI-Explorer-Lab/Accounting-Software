@@ -126,6 +126,7 @@ h2 {
 
 .transaction-card,
 .transaction-list-card,
+.monthly-overview,
 .health-card,
 .architecture {
   display: flex;
@@ -148,6 +149,100 @@ h2 {
 .transaction-list-card {
   display: block;
   margin-bottom: 1rem;
+}
+
+.monthly-overview {
+  display: block;
+  margin-bottom: 1rem;
+}
+
+.month-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  color: #34493d;
+  font-weight: 750;
+}
+
+.month-picker input {
+  border: 1px solid rgba(52, 81, 63, 0.24);
+  border-radius: 0.8rem;
+  padding: 0.65rem 0.8rem;
+  color: inherit;
+  background: rgba(255, 255, 255, 0.72);
+  font: inherit;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.8rem;
+  margin: 0;
+}
+
+.summary-grid > div {
+  padding: 1rem;
+  border-radius: 1rem;
+  background: rgba(39, 79, 58, 0.07);
+}
+
+.summary-grid dt {
+  color: #617067;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.summary-grid dd {
+  margin: 0.4rem 0 0;
+  font-size: 1.15rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.category-analysis {
+  margin-top: 2rem;
+}
+
+.category-analysis h3 {
+  margin: 0 0 1rem;
+}
+
+.category-empty {
+  margin: 0;
+  padding: 1.5rem;
+  color: #617067;
+  text-align: center;
+}
+
+.category-list {
+  display: grid;
+  gap: 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.category-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.category-track {
+  height: 0.7rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(39, 79, 58, 0.12);
+}
+
+.category-bar {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #397352;
 }
 
 .section-heading {
@@ -464,11 +559,21 @@ h2 {
 
 :root[data-theme="dark"] .transaction-card,
 :root[data-theme="dark"] .transaction-list-card,
+:root[data-theme="dark"] .monthly-overview,
 :root[data-theme="dark"] .health-card,
 :root[data-theme="dark"] .architecture {
   border-color: rgba(181, 211, 191, 0.16);
   background: rgba(24, 38, 30, 0.88);
   box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, 0.2);
+}
+
+:root[data-theme="dark"] .month-picker {
+  color: #c9d8ce;
+}
+
+:root[data-theme="dark"] .month-picker input {
+  border-color: rgba(181, 211, 191, 0.22);
+  background: rgba(9, 18, 13, 0.72);
 }
 
 :root[data-theme="dark"] .transaction-form label,
@@ -553,6 +658,10 @@ h2 {
 
   .transaction-form {
     grid-template-columns: 1fr;
+  }
+
+  .summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .transaction-filters {

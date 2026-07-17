@@ -15,11 +15,14 @@ from .config.config import (
 )
 from .constant.values import API_PREFIX, APP_NAME, APP_VERSION
 from .controller.health_api import router as health_router
+from .controller.platform_api import router as platform_router
 from .controller.queue_api import router as queue_router
 from .controller.task_api import router as task_router
 from .exceptions.exception_handler import register_exception_handlers
 from .middlewares.request_logging import RequestLoggingMiddleware
 from .service.queue_service import QueueService
+from .service.project_registry import ProjectRegistry
+from .service.platform_service import PlatformService
 from .service.task_service import TaskService
 
 
@@ -42,28 +45,40 @@ def create_app(
 
         environment = config.get("environment", {}) or {}
         agent = config.get("agent", {}) or {}
-        service = task_service or TaskService(
-            repo_root_from_settings(config),
-            validation_timeout_seconds=float(
-                agent.get("validation_timeout_seconds", 900)
-            ),
-        )
-        queues = queue_service
-        if queues is None and isinstance(service, TaskService):
-            queues = QueueService(
+        registry: ProjectRegistry | None = None
+        if task_service is None and queue_service is None:
+            registry = ProjectRegistry(config)
+            service = registry.default.task_service
+            queues = registry.default.queue_service
+        else:
+            service = task_service or TaskService(
                 repo_root_from_settings(config),
                 validation_timeout_seconds=float(
                     agent.get("validation_timeout_seconds", 900)
                 ),
-                executor=service.executor,
             )
+            queues = queue_service
+            if queues is None and isinstance(service, TaskService):
+                queues = QueueService(
+                    repo_root_from_settings(config),
+                    validation_timeout_seconds=float(
+                        agent.get("validation_timeout_seconds", 900)
+                    ),
+                    executor=service.executor,
+                )
         app.state.environment = str(environment.get("name", "development"))
+        app.state.project_registry = registry
+        app.state.platform_service = (
+            PlatformService(registry, config) if registry is not None else None
+        )
         app.state.task_service = service
         app.state.queue_service = queues
         try:
             yield
         finally:
-            if owns_service:
+            if registry is not None:
+                registry.close(wait=False)
+            elif owns_service:
                 service.close(wait=False)
 
     environment = config.get("environment", {}) or {}
@@ -79,11 +94,12 @@ def create_app(
         allow_origins=[str(origin) for origin in server.get("cors_origins", [])],
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Content-Type", "X-Request-ID"],
+        allow_headers=["Content-Type", "X-Request-ID", "X-Project-ID"],
     )
     app.add_middleware(RequestLoggingMiddleware)
     register_exception_handlers(app)
     app.include_router(health_router, prefix=API_PREFIX)
+    app.include_router(platform_router, prefix=API_PREFIX)
     app.include_router(task_router, prefix=API_PREFIX)
     app.include_router(queue_router, prefix=API_PREFIX)
     return app

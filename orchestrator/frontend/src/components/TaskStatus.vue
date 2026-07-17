@@ -1,27 +1,29 @@
 <script setup lang="ts">
 import { computed } from "vue";
 
+import CopyButton from "./CopyButton.vue";
 import type { TaskData } from "../types/task";
 
-
-const props = defineProps<{
-  task: TaskData;
-}>();
+const props = defineProps<{ task: TaskData }>();
 
 const labels: Record<TaskData["status"], string> = {
   accepted: "已接收",
   running: "执行中",
+  pausing: "正在暂停",
+  paused: "已暂停",
+  cancelling: "正在取消",
+  cancelled: "已取消",
   success: "机器验证通过",
-  manual_review: "机器流程待处理",
+  manual_review: "需要人工判断",
   infrastructure_error: "运行环境故障",
 };
 
 const reviewLabels: Record<TaskData["review_status"], string> = {
-  pending: "待人工审查",
+  pending: "待人工审核",
   approved: "已批准",
   changes_requested: "要求修改",
   rejected: "已驳回",
-  unavailable: "旧记录无审查信息",
+  unavailable: "历史信息缺失",
 };
 
 const statusLabel = computed(() => labels[props.task.status]);
@@ -32,6 +34,17 @@ const effectivePermissions = computed(() => {
     ? (effective as Record<string, unknown>)
     : {};
 });
+const elapsed = computed(() => {
+  const started = new Date(props.task.started_at).getTime();
+  const ended = new Date(
+    props.task.finished_at || props.task.updated_at || props.task.started_at,
+  ).getTime();
+  if (!Number.isFinite(started) || !Number.isFinite(ended)) return "—";
+  const seconds = Math.max(0, Math.round((ended - started) / 1000));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes} 分 ${seconds % 60} 秒`;
+});
 
 function formatTime(value: string | null): string {
   if (!value) return "—";
@@ -41,85 +54,48 @@ function formatTime(value: string | null): string {
 </script>
 
 <template>
-  <section class="panel status-panel" data-test="task-status">
-    <div class="panel-heading">
+  <section class="surface status-surface" data-test="task-status">
+    <div class="surface-heading">
       <div>
-        <p class="eyebrow">当前任务</p>
+        <span class="section-kicker">当前任务</span>
         <h2>{{ task.requirement }}</h2>
       </div>
-      <span class="status-badge" :class="`status-${task.status}`">
+      <span class="status-chip" :class="`status-${task.status}`">
+        <i v-if="['accepted', 'running', 'pausing', 'cancelling'].includes(task.status)" />
         {{ statusLabel }}
       </span>
     </div>
 
-    <dl class="status-grid">
-      <div>
-        <dt>任务编号</dt>
-        <dd>{{ task.task_id }}</dd>
-      </div>
-      <div>
-        <dt>当前阶段</dt>
-        <dd>{{ task.phase || "等待启动" }}</dd>
-      </div>
-      <div>
-        <dt>Codex 轮次</dt>
-        <dd>{{ task.turn_count }}</dd>
-      </div>
-      <div>
-        <dt>验证失败</dt>
-        <dd>{{ task.cycle_failure_count }} / 3（累计 {{ task.failure_count }}）</dd>
-      </div>
-      <div>
-        <dt>Thread</dt>
-        <dd>{{ task.thread_id || "尚未创建" }}</dd>
-      </div>
-      <div>
-        <dt>更新时间</dt>
-        <dd>{{ formatTime(task.updated_at) }}</dd>
-      </div>
-      <div>
-        <dt>人工审查</dt>
-        <dd>{{ reviewLabel }}</dd>
-      </div>
-      <div v-if="!task.legacy">
-        <dt>任务分支</dt>
-        <dd>{{ task.workspace.task_branch || "—" }}</dd>
-      </div>
-      <div v-if="!task.legacy">
-        <dt>基线 commit</dt>
-        <dd>{{ task.workspace.base_commit || "—" }}</dd>
-      </div>
-      <div v-if="!task.legacy">
-        <dt>独立 worktree</dt>
-        <dd>{{ task.workspace.worktree || "—" }}</dd>
-      </div>
-      <div v-if="!task.legacy">
-        <dt>权限核验</dt>
-        <dd>{{ effectivePermissions.verified ? "已通过" : "未通过" }}</dd>
-      </div>
-      <div v-if="!task.legacy">
-        <dt>网络</dt>
-        <dd>{{ effectivePermissions.network || "disabled" }}</dd>
-      </div>
-      <div v-if="!task.legacy">
-        <dt>越权拒绝</dt>
-        <dd>{{ task.audit_summary.denied_event_count || 0 }} 次</dd>
-      </div>
-    </dl>
-
-    <div v-if="task.history_warning" class="result-alert review-alert">
-      <strong>历史记录不完整</strong>
-      <p>{{ task.history_warning }}</p>
+    <div class="metric-strip">
+      <div><span>当前阶段</span><strong>{{ task.phase || "等待启动" }}</strong></div>
+      <div><span>Codex 轮次</span><strong>{{ task.turn_count }}</strong></div>
+      <div><span>验证轮次</span><strong>{{ task.rounds.length }}</strong></div>
+      <div><span>实际耗时</span><strong>{{ elapsed }}</strong></div>
     </div>
 
-    <div v-if="task.infrastructure_error" class="result-alert error-alert">
-      <strong>运行环境故障</strong>
-      <p>{{ task.infrastructure_error }}</p>
+    <details class="technical-details">
+      <summary>运行与隔离详情</summary>
+      <dl class="detail-grid">
+        <div><dt>任务编号</dt><dd class="copy-value"><span>{{ task.task_id }}</span><CopyButton :value="task.task_id" label="任务编号" /></dd></div>
+        <div><dt>更新时间</dt><dd>{{ formatTime(task.updated_at) }}</dd></div>
+        <div><dt>人工审核</dt><dd>{{ reviewLabel }}</dd></div>
+        <div><dt>Thread</dt><dd class="copy-value"><span>{{ task.thread_id || "尚未创建" }}</span><CopyButton v-if="task.thread_id" :value="task.thread_id" label="Thread" /></dd></div>
+        <div v-if="!task.legacy"><dt>任务分支</dt><dd>{{ task.workspace.task_branch || "—" }}</dd></div>
+        <div v-if="!task.legacy"><dt>基线 commit</dt><dd class="copy-value"><span>{{ task.workspace.base_commit || "—" }}</span><CopyButton v-if="task.workspace.base_commit" :value="String(task.workspace.base_commit)" label="commit" /></dd></div>
+        <div v-if="!task.legacy"><dt>独立 worktree</dt><dd>{{ task.workspace.worktree || "—" }}</dd></div>
+        <div v-if="!task.legacy"><dt>权限核验</dt><dd>{{ effectivePermissions.verified ? "已通过" : "未通过" }}</dd></div>
+        <div v-if="!task.legacy"><dt>网络</dt><dd>{{ effectivePermissions.network || "disabled" }}</dd></div>
+        <div v-if="!task.legacy"><dt>越权拒绝</dt><dd>{{ task.audit_summary.denied_event_count || 0 }} 次</dd></div>
+      </dl>
+    </details>
+
+    <div v-if="task.history_warning" class="callout warning-callout">
+      <strong>历史记录不完整</strong><p>{{ task.history_warning }}</p>
     </div>
-    <div
-      v-else-if="task.status === 'manual_review'"
-      class="result-alert review-alert"
-    >
+    <div v-if="task.infrastructure_error" class="callout danger-callout">
+      <strong>运行环境故障</strong><p>{{ task.infrastructure_error }}</p>
+    </div>
+    <div v-else-if="task.status === 'manual_review'" class="callout warning-callout">
       <strong>机器流程需要人工判断</strong>
       <p>{{ task.last_error_summary || "代码已连续三轮验证失败。" }}</p>
     </div>

@@ -45,13 +45,23 @@ class RunStatus(str, Enum):
     """Lifecycle values persisted in ``state.json`` and ``result.json``."""
 
     RUNNING = "running"
+    PAUSING = "pausing"
+    PAUSED = "paused"
+    CANCELLING = "cancelling"
+    CANCELLED = "cancelled"
     SUCCESS = "success"
     MANUAL_REVIEW = "manual_review"
     INFRASTRUCTURE_ERROR = "infrastructure_error"
 
     @property
     def is_final(self) -> bool:
-        return self is not RunStatus.RUNNING
+        return self in {
+            RunStatus.PAUSED,
+            RunStatus.CANCELLED,
+            RunStatus.SUCCESS,
+            RunStatus.MANUAL_REVIEW,
+            RunStatus.INFRASTRUCTURE_ERROR,
+        }
 
 
 class ReviewStatus(str, Enum):
@@ -68,6 +78,10 @@ class QueueStatus(str, Enum):
 
     PENDING = "pending"
     RUNNING = "running"
+    PAUSING = "pausing"
+    PAUSED = "paused"
+    CANCELLING = "cancelling"
+    CANCELLED = "cancelled"
     WAITING_REVIEW = "waiting_review"
     REJECTED = "rejected"
     INFRASTRUCTURE_ERROR = "infrastructure_error"
@@ -75,7 +89,12 @@ class QueueStatus(str, Enum):
 
     @property
     def is_final(self) -> bool:
-        return self in {QueueStatus.REJECTED, QueueStatus.COMPLETED}
+        return self in {
+            QueueStatus.CANCELLED,
+            QueueStatus.REJECTED,
+            QueueStatus.INFRASTRUCTURE_ERROR,
+            QueueStatus.COMPLETED,
+        }
 
 
 class QueueTaskStatus(str, Enum):
@@ -83,6 +102,11 @@ class QueueTaskStatus(str, Enum):
 
     PENDING = "pending"
     RUNNING = "running"
+    PAUSING = "pausing"
+    PAUSED = "paused"
+    CANCELLING = "cancelling"
+    CANCELLED = "cancelled"
+    SKIPPED = "skipped"
     WAITING_REVIEW = "waiting_review"
     COMPLETED = "completed"
     REJECTED = "rejected"
@@ -208,6 +232,7 @@ class TaskSpec(JsonModel):
     schema_version: int = SCHEMA_VERSION
     queue_id: str | None = None
     sequence: int | None = None
+    rerun_of: str | None = None
 
     _TASK_ID_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         r"^[A-Za-z0-9][A-Za-z0-9._-]{0,126}[A-Za-z0-9]$|^[A-Za-z0-9]$"
@@ -255,6 +280,15 @@ class TaskSpec(JsonModel):
             self.sequence = int(self.sequence)
         elif self.sequence is not None:
             raise ValueError("sequence requires queue_id")
+        if self.rerun_of is not None:
+            self.rerun_of = str(self.rerun_of).strip()
+            if (
+                "/" in self.rerun_of
+                or "\\" in self.rerun_of
+                or ".." in self.rerun_of
+                or not self._TASK_ID_PATTERN.fullmatch(self.rerun_of)
+            ):
+                raise ValueError("rerun_of must be a safe task identifier")
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -267,6 +301,8 @@ class TaskSpec(JsonModel):
         if self.queue_id is not None:
             data["queue_id"] = self.queue_id
             data["sequence"] = self.sequence
+        if self.rerun_of is not None:
+            data["rerun_of"] = self.rerun_of
         return data
 
     @classmethod
@@ -286,6 +322,9 @@ class TaskSpec(JsonModel):
             ),
             sequence=(
                 None if data.get("sequence") is None else int(data["sequence"])
+            ),
+            rerun_of=(
+                None if data.get("rerun_of") is None else str(data["rerun_of"])
             ),
         )
 
@@ -309,6 +348,7 @@ class TaskQueueSpec(JsonModel):
     base_commit: str = ""
     created_at: str = field(default_factory=utc_now_iso)
     schema_version: int = QUEUE_SCHEMA_VERSION
+    rerun_of: str | None = None
 
     def __post_init__(self) -> None:
         self.name = str(self.name).strip()
@@ -324,6 +364,15 @@ class TaskQueueSpec(JsonModel):
             raise ValueError("queue_id must be a safe identifier")
         self.base_ref = str(self.base_ref or "HEAD").strip()
         self.base_commit = str(self.base_commit).strip()
+        if self.rerun_of is not None:
+            self.rerun_of = str(self.rerun_of).strip()
+            if (
+                "/" in self.rerun_of
+                or "\\" in self.rerun_of
+                or ".." in self.rerun_of
+                or not TaskSpec._TASK_ID_PATTERN.fullmatch(self.rerun_of)
+            ):
+                raise ValueError("rerun_of must be a safe queue identifier")
         if len(self.subtasks) < 2:
             raise ValueError("a task queue must contain at least two subtasks")
         ids: set[str] = set()
@@ -344,6 +393,7 @@ class TaskQueueSpec(JsonModel):
         *,
         queue_id: str | None = None,
         base_ref: str = "HEAD",
+        rerun_of: str | None = None,
     ) -> "TaskQueueSpec":
         resolved_queue_id = str(queue_id or generate_queue_id())
         tasks: list[TaskSpec] = []
@@ -370,10 +420,11 @@ class TaskQueueSpec(JsonModel):
             name=name,
             subtasks=tasks,
             base_ref=base_ref,
+            rerun_of=rerun_of,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "schema_version": self.schema_version,
             "queue_id": self.queue_id,
             "name": self.name,
@@ -382,6 +433,9 @@ class TaskQueueSpec(JsonModel):
             "created_at": self.created_at,
             "subtasks": [task.to_dict() for task in self.subtasks],
         }
+        if self.rerun_of is not None:
+            data["rerun_of"] = self.rerun_of
+        return data
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "TaskQueueSpec":
@@ -397,6 +451,9 @@ class TaskQueueSpec(JsonModel):
             base_commit=str(data.get("base_commit", "")),
             created_at=str(data.get("created_at") or utc_now_iso()),
             schema_version=int(data.get("schema_version", QUEUE_SCHEMA_VERSION)),
+            rerun_of=(
+                None if data.get("rerun_of") is None else str(data["rerun_of"])
+            ),
             subtasks=[TaskSpec.from_dict(item) for item in values],
         )
 
@@ -489,7 +546,10 @@ class QueueState(JsonModel):
 
     def next_pending(self) -> QueueTaskState | None:
         for task in self.ordered_subtasks():
-            if task.status is QueueTaskStatus.COMPLETED:
+            if task.status in {
+                QueueTaskStatus.COMPLETED,
+                QueueTaskStatus.SKIPPED,
+            }:
                 continue
             if task.status is QueueTaskStatus.PENDING:
                 return task
@@ -822,6 +882,32 @@ class RunState(JsonModel):
         else:
             self.phase = RunPhase.PROMPT_PENDING
             self.pending_prompt_kind = PromptKind.INITIAL
+        self.touch()
+
+    def reopen_after_pause(self) -> None:
+        """Resume the exact checkpoint retained by a cooperative pause."""
+
+        if self.status is not RunStatus.PAUSED:
+            raise ValueError("only paused runs can be resumed")
+        self.status = RunStatus.RUNNING
+        self.infrastructure_error = None
+        self.finished_at = None
+        self.touch()
+
+    def mark_paused(self) -> None:
+        """Release the executor while retaining the current workflow phase."""
+
+        self.status = RunStatus.PAUSED
+        self.finished_at = utc_now_iso()
+        self.touch()
+
+    def mark_cancelled(self) -> None:
+        """Finish the run without treating a user cancellation as a failure."""
+
+        self.status = RunStatus.CANCELLED
+        self.phase = RunPhase.COMPLETED
+        self.pending_prompt_kind = None
+        self.finished_at = utc_now_iso()
         self.touch()
 
     def mark_success(self, final_git_summary: str = "") -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from threading import RLock
+from threading import BoundedSemaphore, RLock
 from typing import Callable, TypeVar
 
 from orchestrator.codex_loop.models import RunResult, TaskSpec
@@ -21,7 +21,7 @@ class ExecutionRecord:
 class TaskExecutor:
     """Run at most one blocking orchestrator workflow outside the event loop."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, global_gate: BoundedSemaphore | None = None) -> None:
         self._pool = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="codex-orchestrator",
@@ -29,6 +29,13 @@ class TaskExecutor:
         self._records: dict[str, ExecutionRecord] = {}
         self._lock = RLock()
         self._closed = False
+        self._global_gate = global_gate
+
+    def _run(self, operation: Callable[..., object], *args: object) -> object:
+        if self._global_gate is None:
+            return operation(*args)
+        with self._global_gate:
+            return operation(*args)
 
     def submit(
         self,
@@ -49,7 +56,7 @@ class TaskExecutor:
                 raise RuntimeError("Task executor is closed")
             if self.active_task_id() is not None:
                 raise RuntimeError("Another task is already running")
-            future = self._pool.submit(operation)
+            future = self._pool.submit(self._run, operation)
             record = ExecutionRecord(
                 identifier=identifier,
                 task=task,
@@ -72,7 +79,7 @@ class TaskExecutor:
             if self.active_task_id() is not None:
                 raise RuntimeError("Another task is already running")
             prepared = prepare()
-            future = self._pool.submit(operation, prepared)
+            future = self._pool.submit(self._run, operation, prepared)
             record = ExecutionRecord(
                 identifier=identifier,
                 task=None,

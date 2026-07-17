@@ -113,6 +113,14 @@ class OrchestrationWorkflow:
                     else "source worktree clean"
                 ),
             )
+            if task.queue_id is not None:
+                queue_control = QueueStore(self.control_repo_root).load_control(
+                    task.queue_id
+                )
+                if queue_control is not None:
+                    self.store.request_control(
+                        task.task_id, str(queue_control.get("action", ""))
+                    )
             manifest = workspace.manifest()
             if task.queue_id is not None:
                 manifest["queue"] = {
@@ -122,7 +130,10 @@ class OrchestrationWorkflow:
                 }
             self.store.save_manifest(task.task_id, manifest)
             audit = self._audit(state)
-            audit.append("run.created", {"task_id": task.task_id})
+            audit.append(
+                "run.created",
+                {"task_id": task.task_id, "rerun_of": task.rerun_of},
+            )
             audit.append(
                 "workspace.created",
                 {
@@ -213,6 +224,11 @@ class OrchestrationWorkflow:
                 "workspace.verified",
                 {"branch": workspace.task_branch, "head": workspace.base_commit},
             )
+            if state.status is RunStatus.PAUSED:
+                state.reopen_after_pause()
+                self.store.clear_control(task_id)
+                self.store.save_state(state)
+                audit.append("run.resumed", {"checkpoint": state.phase.value})
             if state.phase is not RunPhase.CODEX_TURN and state.last_diff_sha256:
                 if audit.current_diff_sha256() != state.last_diff_sha256:
                     raise InfrastructureError(
@@ -270,6 +286,8 @@ class OrchestrationWorkflow:
         audit: AuditRecorder,
     ) -> RunResult:
         while state.status is RunStatus.RUNNING:
+            if self._apply_control(state, audit):
+                return self._persist_final(task, state, audit)
             self._recover_round_checkpoint(state, audit)
             if state.status.is_final:
                 return self._persist_final(task, state, audit)
@@ -294,6 +312,32 @@ class OrchestrationWorkflow:
                 return self._persist_final(task, state, audit)
             raise InfrastructureError(f"Unsupported workflow phase: {state.phase}")
         return self._persist_final(task, state, audit)
+
+    def _apply_control(self, state: RunState, audit: AuditRecorder) -> bool:
+        """Apply a durable pause/cancel request only between unsafe operations."""
+
+        request = self.store.load_control(state.task_id)
+        if request is None:
+            return False
+        action = str(request.get("action", ""))
+        if action == "pause":
+            state.mark_paused()
+            event_type = "run.paused"
+        elif action == "cancel":
+            state.mark_cancelled()
+            event_type = "run.cancelled"
+        else:
+            raise InfrastructureError(f"Unsupported control action: {action}")
+        self.store.save_state(state)
+        audit.append(
+            event_type,
+            {
+                "requested_at": request.get("requested_at"),
+                "checkpoint": state.phase.value,
+            },
+        )
+        self.store.clear_control(state.task_id)
+        return True
 
     def _run_pending_turn(
         self,
@@ -647,11 +691,14 @@ class OrchestrationWorkflow:
             ),
         )
         self.store.save_state(state)
-        event_type = (
-            "run.failed"
-            if state.status is RunStatus.INFRASTRUCTURE_ERROR
-            else "run.completed"
-        )
+        if state.status is RunStatus.INFRASTRUCTURE_ERROR:
+            event_type = "run.failed"
+        elif state.status is RunStatus.PAUSED:
+            event_type = "run.paused"
+        elif state.status is RunStatus.CANCELLED:
+            event_type = "run.cancelled"
+        else:
+            event_type = "run.completed"
         if not audit.has_event(event_type):
             audit.append(
                 event_type,

@@ -1,6 +1,10 @@
 export type TaskStatus =
   | "accepted"
   | "running"
+  | "pausing"
+  | "paused"
+  | "cancelling"
+  | "cancelled"
   | "success"
   | "manual_review"
   | "infrastructure_error";
@@ -13,6 +17,7 @@ export type ReviewStatus =
   | "unavailable";
 
 export type ReviewDecision = Exclude<ReviewStatus, "pending" | "unavailable">;
+export type RunKind = "task" | "queue";
 
 export interface TaskCreatePayload {
   requirement: string;
@@ -56,7 +61,7 @@ export interface TaskData {
   schema_version: number;
   legacy: boolean;
   history_warning: string | null;
-  machine_status: TaskStatus;
+  machine_status: TaskStatus | null;
   review_status: ReviewStatus;
   phase: string | null;
   thread_id: string | null;
@@ -83,11 +88,16 @@ export interface TaskData {
   review_history: Array<Record<string, unknown>>;
   queue_id: string | null;
   sequence: number | null;
+  rerun_of: string | null;
 }
 
 export type QueueStatus =
   | "pending"
   | "running"
+  | "pausing"
+  | "paused"
+  | "cancelling"
+  | "cancelled"
   | "waiting_review"
   | "rejected"
   | "infrastructure_error"
@@ -96,6 +106,11 @@ export type QueueStatus =
 export type QueueSubtaskStatus =
   | "pending"
   | "running"
+  | "pausing"
+  | "paused"
+  | "cancelling"
+  | "cancelled"
+  | "skipped"
   | "waiting_review"
   | "completed"
   | "rejected"
@@ -134,6 +149,86 @@ export interface QueueData {
   finished_at: string | null;
   report_url: string | null;
   diff_url: string | null;
+  rerun_of: string | null;
+}
+
+export interface ProjectData {
+  project_id: string;
+  name: string;
+  repo_root: string;
+  is_default: boolean;
+  active_identifier: string | null;
+}
+
+export interface HistoryItemData {
+  kind: RunKind;
+  identifier: string;
+  project_id: string;
+  project_name: string;
+  title: string;
+  status: string;
+  review_status: ReviewStatus | null;
+  started_at: string;
+  updated_at: string;
+  finished_at: string | null;
+  current_task_id: string | null;
+}
+
+export interface HistoryPageData {
+  items: HistoryItemData[];
+  page: number;
+  page_size: number;
+  total: number;
+  pages: number;
+}
+
+export interface EventRecord {
+  seq: number;
+  type: string;
+  event?: string;
+  timestamp: string;
+  task_id?: string;
+  queue_id?: string;
+  [key: string]: unknown;
+}
+
+export interface EventPageData {
+  items: EventRecord[];
+  next_cursor: number;
+  terminal: boolean;
+}
+
+export interface LogData {
+  log_id: string;
+  name: string;
+  size: number;
+  sha256: string;
+}
+
+export interface NotificationData {
+  notification_id: string;
+  project_id: string;
+  kind: RunKind;
+  identifier: string;
+  category: "waiting_review" | "completed" | "failure" | "cancelled";
+  title: string;
+  message: string;
+  created_at: string;
+  read_at: string | null;
+  delivery: Record<string, string>;
+}
+
+export interface NotificationSettingsData {
+  in_app: boolean;
+  browser: boolean;
+  email_configured: boolean;
+  webhook_configured: boolean;
+}
+
+export interface HealthData {
+  status: string;
+  environment: string;
+  version: string;
 }
 
 export interface ApiResponse<T> {

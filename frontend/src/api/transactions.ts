@@ -34,6 +34,21 @@ export interface TransactionDeleteData {
   id: number
 }
 
+export interface ExpenseCategoryData {
+  category: string
+  amount: string
+  percentage: string
+}
+
+export interface MonthlyTransactionStatisticsData {
+  month: string
+  income_total: string
+  expense_total: string
+  balance: string
+  transaction_count: number
+  expense_by_category: ExpenseCategoryData[]
+}
+
 export function createTransaction(transaction: TransactionInput) {
   return post<TransactionData, TransactionInput>('/api/transactions', transaction)
 }
@@ -51,4 +66,10 @@ export function listTransactions(query: TransactionQuery = {}) {
 
 export function deleteTransaction(transactionId: number) {
   return del<TransactionDeleteData>(`/api/transactions/${transactionId}`)
+}
+
+export function getMonthlyStatistics(month: string) {
+  return get<MonthlyTransactionStatisticsData>(
+    `/api/transactions/statistics/monthly?month=${encodeURIComponent(month)}`,
+  )
 }

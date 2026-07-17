@@ -112,6 +112,7 @@ describe('TransactionList', () => {
     expect(mockedDeleteTransaction).toHaveBeenCalledWith(7)
     expect(mockedListTransactions).toHaveBeenCalledTimes(2)
     expect(wrapper.get('[role="status"]').text()).toBe('交易已删除')
+    expect(wrapper.emitted('deleted')).toHaveLength(1)
   })
 
   it('shows a friendly message and reloads when deletion returns 404', async () => {

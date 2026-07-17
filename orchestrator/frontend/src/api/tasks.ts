@@ -1,4 +1,4 @@
-import { apiRequest, ApiError } from "./http";
+import { apiRequest, apiText } from "./http";
 import type { ReviewPayload, TaskCreatePayload, TaskData } from "../types/task";
 
 
@@ -20,22 +20,30 @@ export function resumeTask(taskId: string): Promise<TaskData> {
   );
 }
 
+export function pauseTask(taskId: string): Promise<TaskData> {
+  return apiRequest<TaskData>(`/api/tasks/${encodeURIComponent(taskId)}/pause`, {
+    method: "POST",
+  });
+}
+
+export function cancelTask(taskId: string): Promise<TaskData> {
+  return apiRequest<TaskData>(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+    method: "POST",
+  });
+}
+
+export function rerunTask(taskId: string): Promise<TaskData> {
+  return apiRequest<TaskData>(`/api/tasks/${encodeURIComponent(taskId)}/rerun`, {
+    method: "POST",
+  });
+}
+
 export async function getTaskReport(taskId: string): Promise<string> {
-  const response = await fetch(
-    `/api/tasks/${encodeURIComponent(taskId)}/report`,
-  );
-  if (!response.ok) {
-    throw new ApiError(`报告读取失败（${response.status}）`, response.status);
-  }
-  return response.text();
+  return apiText(`/api/tasks/${encodeURIComponent(taskId)}/report`);
 }
 
 export async function getTaskDiff(taskId: string): Promise<string> {
-  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/diff`);
-  if (!response.ok) {
-    throw new ApiError(`Diff 读取失败（${response.status}）`, response.status);
-  }
-  return response.text();
+  return apiText(`/api/tasks/${encodeURIComponent(taskId)}/diff`);
 }
 
 export function submitTaskReview(

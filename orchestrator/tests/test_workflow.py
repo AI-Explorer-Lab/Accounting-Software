@@ -518,6 +518,62 @@ def test_resume_backfills_completed_items_without_duplicate_events(
     assert sum(event["type"] == "codex.item.completed" for event in events) == 2
 
 
+def test_durable_pause_retains_checkpoint_and_resume_continues_it(repo: Path) -> None:
+    saved_task = task()
+    store, state = initialize_isolated_run(repo, saved_task)
+    store.request_control(saved_task.task_id, "pause")
+    first_client = FakeCodexClient()
+
+    paused = workflow_with(
+        repo,
+        first_client,
+        FakeValidator([(True, [0])]),
+    ).resume(saved_task.task_id)
+
+    checkpoint = store.load_state(saved_task.task_id)
+    assert paused.status is RunStatus.PAUSED
+    assert checkpoint.status is RunStatus.PAUSED
+    assert checkpoint.phase is RunPhase.PROMPT_PENDING
+    assert checkpoint.pending_prompt_kind is PromptKind.INITIAL
+    assert store.load_control(saved_task.task_id) is None
+    assert first_client.prompts == []
+
+    resumed_client = FakeCodexClient(thread_id="unused")
+    resumed = workflow_with(
+        repo,
+        resumed_client,
+        FakeValidator([(True, [0])]),
+    ).resume(saved_task.task_id)
+
+    assert resumed.status is RunStatus.SUCCESS
+    assert len(resumed_client.prompts) == 1
+    events = [
+        json.loads(line)
+        for line in (store.run_dir(saved_task.task_id) / "events.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    assert any(event["type"] == "run.paused" for event in events)
+    assert any(event["type"] == "run.resumed" for event in events)
+
+
+def test_durable_cancel_finishes_without_running_the_pending_prompt(repo: Path) -> None:
+    saved_task = task()
+    store, _state = initialize_isolated_run(repo, saved_task)
+    store.request_control(saved_task.task_id, "cancel")
+    client = FakeCodexClient()
+
+    cancelled = workflow_with(
+        repo,
+        client,
+        FakeValidator([(True, [0])]),
+    ).resume(saved_task.task_id)
+
+    assert cancelled.status is RunStatus.CANCELLED
+    assert client.prompts == []
+    assert store.load_state(saved_task.task_id).phase is RunPhase.COMPLETED
+
+
 def test_resume_rejects_worktree_change_not_declared_by_recovered_turn(
     repo: Path,
 ) -> None:

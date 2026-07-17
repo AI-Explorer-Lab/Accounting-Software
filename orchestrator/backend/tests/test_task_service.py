@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from threading import Event
+from threading import BoundedSemaphore, Event
 
 import pytest
 
@@ -12,6 +12,7 @@ from orchestrator.backend.exceptions.business_exception import (
     TaskNotReadyError,
 )
 from orchestrator.backend.service.task_service import TaskService
+from orchestrator.backend.utils.task_executor import TaskExecutor
 from orchestrator.codex_loop.models import RunResult, TaskQueueSpec, TaskSpec
 from orchestrator.codex_loop.report import ReportBuilder
 from orchestrator.codex_loop.state import QueueStore, StateStore
@@ -210,3 +211,92 @@ def test_task_detail_finds_a_subtask_in_its_queue_directory(tmp_path: Path) -> N
     assert snapshot.queue_id == spec.queue_id
     assert snapshot.sequence == 1
     assert snapshot.task_id == child.task_id
+
+
+def test_inactive_task_can_pause_resume_and_cancel_at_a_checkpoint(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path)
+    task = TaskSpec(
+        task_id="controlled-task",
+        requirement="Keep checkpoint",
+        acceptance_criteria=["Can resume"],
+    )
+    state = store.initialize_run(task)
+    original_phase = state.phase
+    service = TaskService(
+        tmp_path,
+        workflow_factory=lambda: CompletingWorkflow(store),
+    )
+    try:
+        paused = service.request_control(task.task_id, "pause")
+        assert paused.status == "paused"
+        assert store.load_state(task.task_id).phase is original_phase
+        assert task.task_id in store.unfinished_task_ids()
+
+        service.resume_task(task.task_id)
+        record = service.executor.get(task.task_id)
+        assert record is not None
+        record.future.result(timeout=5)
+        assert service.get_task(task.task_id).status == "success"
+
+        cancelled_task = TaskSpec(
+            task_id="cancelled-task",
+            requirement="Stop safely",
+            acceptance_criteria=["Stops"],
+        )
+        store.initialize_run(cancelled_task)
+        cancelled = service.request_control(cancelled_task.task_id, "cancel")
+        assert cancelled.status == "cancelled"
+        assert cancelled.finished_at is not None
+    finally:
+        service.close(wait=True)
+
+
+def test_rerun_creates_a_new_task_with_the_same_definition(tmp_path: Path) -> None:
+    store = StateStore(tmp_path)
+    service = TaskService(
+        tmp_path,
+        workflow_factory=lambda: CompletingWorkflow(store),
+    )
+    try:
+        first = service.start_task("Repeat me", ["Still works"])
+        first_record = service.executor.get(first.task_id)
+        assert first_record is not None
+        first_record.future.result(timeout=5)
+
+        rerun = service.rerun_task(first.task_id)
+        rerun_record = service.executor.get(rerun.task_id)
+        assert rerun_record is not None
+        rerun_record.future.result(timeout=5)
+    finally:
+        service.close(wait=True)
+
+    assert rerun.task_id != first.task_id
+    assert rerun.rerun_of == first.task_id
+    assert rerun.requirement == first.requirement
+    assert rerun.acceptance_criteria == first.acceptance_criteria
+
+
+def test_control_request_is_durable_before_a_gated_task_initializes(
+    tmp_path: Path,
+) -> None:
+    gate = BoundedSemaphore(1)
+    gate.acquire()
+    store = StateStore(tmp_path)
+    executor = TaskExecutor(global_gate=gate)
+    service = TaskService(
+        tmp_path,
+        executor=executor,
+        workflow_factory=lambda: CompletingWorkflow(store),
+    )
+    try:
+        accepted = service.start_task("Pause early", ["Does not disappear"])
+        projected = service.request_control(accepted.task_id, "pause")
+
+        assert projected.status == "pausing"
+        assert service.get_task(accepted.task_id).status == "pausing"
+        assert store.load_control(accepted.task_id)["action"] == "pause"
+    finally:
+        gate.release()
+        service.close(wait=True)

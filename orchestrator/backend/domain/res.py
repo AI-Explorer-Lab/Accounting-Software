@@ -23,6 +23,69 @@ class HealthData(BaseModel):
     version: str
 
 
+class ProjectData(BaseModel):
+    project_id: str
+    name: str
+    repo_root: str
+    is_default: bool
+    active_identifier: str | None = None
+
+
+class HistoryItemData(BaseModel):
+    kind: str
+    identifier: str
+    project_id: str
+    project_name: str
+    title: str
+    status: str
+    review_status: str | None = None
+    started_at: str
+    updated_at: str
+    finished_at: str | None = None
+    current_task_id: str | None = None
+
+
+class HistoryPageData(BaseModel):
+    items: list[HistoryItemData]
+    page: int
+    page_size: int
+    total: int
+    pages: int
+
+
+class EventPageData(BaseModel):
+    items: list[dict[str, Any]]
+    next_cursor: int
+    terminal: bool
+
+
+class LogData(BaseModel):
+    log_id: str
+    name: str
+    size: int
+    sha256: str
+
+
+class NotificationData(BaseModel):
+    notification_id: str
+    project_id: str
+    kind: str
+    identifier: str
+    category: str
+    title: str
+    message: str
+    created_at: str
+    read_at: str | None = None
+    delivery: dict[str, str] = Field(default_factory=dict)
+
+
+class NotificationSettingsData(BaseModel):
+    in_app: bool
+    browser: bool
+    email_configured: bool
+    webhook_configured: bool
+
+
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -60,6 +123,7 @@ class TaskData(BaseModel):
     review_history: list[dict[str, Any]] = Field(default_factory=list)
     queue_id: str | None = None
     sequence: int | None = None
+    rerun_of: str | None = None
 
     @classmethod
     def from_snapshot(cls, snapshot: TaskSnapshot) -> "TaskData":
@@ -96,6 +160,7 @@ class QueueData(BaseModel):
     finished_at: str | None = None
     report_url: str | None = None
     diff_url: str | None = None
+    rerun_of: str | None = None
 
     @classmethod
     def from_snapshot(cls, snapshot: QueueSnapshot) -> "QueueData":

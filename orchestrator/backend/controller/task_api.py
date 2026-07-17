@@ -4,13 +4,15 @@ from fastapi.responses import PlainTextResponse
 from ..domain.req import ReviewRequest, TaskCreateRequest
 from ..domain.res import ApiResponse, TaskData
 from ..service.task_service import TaskService
+from .dependencies import project_context
 
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 
 def _service(request: Request) -> TaskService:
-    return request.app.state.task_service
+    context = project_context(request)
+    return context.task_service if context is not None else request.app.state.task_service
 
 
 def _response(request: Request, snapshot) -> ApiResponse[TaskData]:
@@ -48,6 +50,33 @@ async def get_task(task_id: str, request: Request) -> ApiResponse[TaskData]:
 )
 async def resume_task(task_id: str, request: Request) -> ApiResponse[TaskData]:
     return _response(request, _service(request).resume_task(task_id))
+
+
+@router.post(
+    "/{task_id}/pause",
+    response_model=ApiResponse[TaskData],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def pause_task(task_id: str, request: Request) -> ApiResponse[TaskData]:
+    return _response(request, _service(request).request_control(task_id, "pause"))
+
+
+@router.post(
+    "/{task_id}/cancel",
+    response_model=ApiResponse[TaskData],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def cancel_task(task_id: str, request: Request) -> ApiResponse[TaskData]:
+    return _response(request, _service(request).request_control(task_id, "cancel"))
+
+
+@router.post(
+    "/{task_id}/rerun",
+    response_model=ApiResponse[TaskData],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def rerun_task(task_id: str, request: Request) -> ApiResponse[TaskData]:
+    return _response(request, _service(request).rerun_task(task_id))
 
 
 @router.get("/{task_id}/report", response_class=PlainTextResponse)

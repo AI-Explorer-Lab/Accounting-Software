@@ -13,6 +13,10 @@ const props = defineProps<{
   refreshKey: number
 }>()
 
+const emit = defineEmits<{
+  deleted: []
+}>()
+
 const pageSize = 10
 const transactions = ref<TransactionData[]>([])
 const total = ref(0)
@@ -96,6 +100,7 @@ async function removeTransaction(transactionId: number) {
       page.value -= 1
     }
     await loadTransactions()
+    emit('deleted')
   } catch (caught) {
     if (caught instanceof ApiError && caught.status === 404) {
       await loadTransactions()

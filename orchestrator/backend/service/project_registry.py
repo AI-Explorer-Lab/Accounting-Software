@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from threading import BoundedSemaphore
+from typing import Any
+
+from ..config.config import projects_from_settings
+from ..exceptions.business_exception import ProjectNotFoundError
+from ..utils.task_executor import TaskExecutor
+from .queue_service import QueueService
+from .task_service import TaskService
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectContext:
+    project_id: str
+    name: str
+    repo_root: Path
+    is_default: bool
+    task_service: TaskService
+    queue_service: QueueService
+
+
+class ProjectRegistry:
+    """Own one isolated executor pair per allowlisted repository."""
+
+    def __init__(self, config: Any) -> None:
+        agent = config.get("agent", {}) or {}
+        timeout = float(agent.get("validation_timeout_seconds", 900))
+        gate = BoundedSemaphore(int(agent.get("max_parallel_projects", 1)))
+        self._contexts: dict[str, ProjectContext] = {}
+        self._default_id = ""
+        for item in projects_from_settings(config):
+            project_id = str(item["project_id"])
+            executor = TaskExecutor(global_gate=gate)
+            root = Path(item["repo_root"])
+            tasks = TaskService(
+                root,
+                validation_timeout_seconds=timeout,
+                executor=executor,
+            )
+            queues = QueueService(
+                root,
+                validation_timeout_seconds=timeout,
+                executor=executor,
+            )
+            context = ProjectContext(
+                project_id=project_id,
+                name=str(item["name"]),
+                repo_root=root,
+                is_default=bool(item["is_default"]),
+                task_service=tasks,
+                queue_service=queues,
+            )
+            self._contexts[project_id] = context
+            if context.is_default:
+                self._default_id = project_id
+
+    @property
+    def default(self) -> ProjectContext:
+        return self._contexts[self._default_id]
+
+    def get(self, project_id: str | None = None) -> ProjectContext:
+        resolved = str(project_id or self._default_id).strip()
+        try:
+            return self._contexts[resolved]
+        except KeyError:
+            raise ProjectNotFoundError(resolved) from None
+
+    def all(self) -> list[ProjectContext]:
+        return sorted(
+            self._contexts.values(),
+            key=lambda item: (not item.is_default, item.name.casefold()),
+        )
+
+    def close(self, *, wait: bool = False) -> None:
+        for context in self._contexts.values():
+            context.task_service.close(wait=wait)

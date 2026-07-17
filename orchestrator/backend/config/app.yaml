@@ -11,6 +11,17 @@ default:
   agent:
     repo_root: null
     validation_timeout_seconds: 900
+    max_parallel_projects: 2
+    projects: []
+  notifications:
+    webhook_url: null
+    smtp_host: null
+    smtp_port: 587
+    smtp_starttls: true
+    smtp_username: null
+    smtp_password: null
+    smtp_sender: null
+    smtp_recipient: null
 
 development:
   environment:

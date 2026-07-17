@@ -42,6 +42,12 @@ class FileRunMapper:
 
         task = self.store.load_task(task_id)
         state = self.store.load_state(task_id)
+        control = self.store.load_control(task_id)
+        projected_status = state.status.value
+        if control is not None and state.status.value == "running":
+            projected_status = (
+                "pausing" if control.get("action") == "pause" else "cancelling"
+            )
         legacy = state.schema_version == 0
         manifest = self._optional_json(run_dir / "manifest.json")
         permissions = self._optional_json(run_dir / "permissions.json")
@@ -76,7 +82,7 @@ class FileRunMapper:
             task_id=task.task_id,
             requirement=task.requirement,
             acceptance_criteria=list(task.acceptance_criteria),
-            status=state.status.value,
+            status=projected_status,
             schema_version=state.schema_version,
             legacy=legacy,
             history_warning=(
@@ -84,11 +90,9 @@ class FileRunMapper:
                 if legacy
                 else None
             ),
-            machine_status=state.status.value,
+            machine_status=projected_status,
             review_status=(
-                str(review.get("decision"))
-                if review.get("decision")
-                else ("unavailable" if legacy else state.review_status.value)
+                "unavailable" if legacy else state.review_status.value
             ),
             phase=state.phase.value,
             thread_id=state.thread_id,
@@ -132,6 +136,7 @@ class FileRunMapper:
             review_history=review_history,
             queue_id=task.queue_id,
             sequence=task.sequence,
+            rerun_of=task.rerun_of,
         )
 
     def load_report(self, task_id: str) -> str | None:

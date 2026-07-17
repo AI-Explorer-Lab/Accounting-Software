@@ -32,6 +32,14 @@ class FileQueueMapper:
             return None
         spec = self.store.load_spec(queue_id)
         state = self.store.load_state(queue_id)
+        control = self.store.load_control(queue_id)
+        projected_status = state.status.value
+        projected_child_status: str | None = None
+        if control is not None and state.status.value in {"pending", "running"}:
+            projected_status = (
+                "pausing" if control.get("action") == "pause" else "cancelling"
+            )
+            projected_child_status = projected_status
         specs_by_id = {task.task_id: task for task in spec.subtasks}
         subtasks: list[QueueSubtaskSnapshot] = []
         for child in state.ordered_subtasks():
@@ -42,7 +50,12 @@ class FileQueueMapper:
                     sequence=child.sequence,
                     requirement=task.requirement,
                     acceptance_criteria=list(task.acceptance_criteria),
-                    status=child.status.value,
+                    status=(
+                        projected_child_status
+                        if child.task_id == state.current_task_id
+                        and projected_child_status is not None
+                        else child.status.value
+                    ),
                     machine_status=(
                         None
                         if child.machine_status is None
@@ -57,7 +70,7 @@ class FileQueueMapper:
         return QueueSnapshot(
             queue_id=queue_id,
             name=spec.name,
-            status=state.status.value,
+            status=projected_status,
             base_ref=state.base_ref,
             base_commit=state.base_commit,
             current_task_id=state.current_task_id,
@@ -77,6 +90,7 @@ class FileQueueMapper:
                 if self.store.cumulative_diff_path(queue_id).is_file()
                 else None
             ),
+            rerun_of=spec.rerun_of,
         )
 
     def load_report(self, queue_id: str) -> str | None:

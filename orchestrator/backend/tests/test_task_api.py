@@ -11,6 +11,8 @@ class FakeTaskService:
     def __init__(self) -> None:
         self.created: tuple[str, list[str]] | None = None
         self.resumed: str | None = None
+        self.controlled: tuple[str, str] | None = None
+        self.rerun: str | None = None
 
     def start_task(
         self,
@@ -26,6 +28,15 @@ class FakeTaskService:
     def resume_task(self, task_id: str) -> TaskSnapshot:
         self.resumed = task_id
         return _snapshot(task_id=task_id, status="running")
+
+    def request_control(self, task_id: str, action: str) -> TaskSnapshot:
+        self.controlled = (task_id, action)
+        status = "pausing" if action == "pause" else "cancelling"
+        return _snapshot(task_id=task_id, status=status)
+
+    def rerun_task(self, task_id: str) -> TaskSnapshot:
+        self.rerun = task_id
+        return _snapshot(task_id="task-rerun", status="accepted")
 
     def get_report(self, task_id: str) -> str:
         return f"# Report for {task_id}\n"
@@ -136,6 +147,22 @@ def test_get_resume_and_report() -> None:
     assert report.text == "# Report for task-9\n"
     assert diff.status_code == 200
     assert diff.headers["content-type"].startswith("text/x-diff")
+
+
+def test_pause_cancel_and_rerun_endpoints() -> None:
+    service = FakeTaskService()
+    with _client(service) as client:
+        paused = client.post("/api/tasks/task-9/pause")
+        cancelled = client.post("/api/tasks/task-9/cancel")
+        rerun = client.post("/api/tasks/task-9/rerun")
+
+    assert paused.status_code == 202
+    assert paused.json()["data"]["status"] == "pausing"
+    assert cancelled.json()["data"]["status"] == "cancelling"
+    assert service.controlled == ("task-9", "cancel")
+    assert rerun.status_code == 202
+    assert rerun.json()["data"]["task_id"] == "task-rerun"
+    assert service.rerun == "task-9"
 
 
 def test_review_endpoint_returns_the_recorded_decision() -> None:
