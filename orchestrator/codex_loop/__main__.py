@@ -1,4 +1,4 @@
-"""Command-line entry point for starting and resuming one Codex task."""
+"""Command-line entry point for single tasks and ordered task queues."""
 
 from __future__ import annotations
 
@@ -10,13 +10,17 @@ from typing import Any
 
 from .models import (
     InfrastructureError,
+    QueueStatus,
+    ReviewStatus,
     RunResult,
     RunState,
     RunStatus,
     TaskSpec,
 )
 from .report import ReportBuilder
-from .state import ActiveRunError, StateStore, redact_sensitive_text
+from .queue_workflow import QueueWorkflow
+from .review import ReviewError, ReviewService
+from .state import ActiveRunError, QueueStore, StateStore, redact_sensitive_text
 from .workflow import OrchestrationWorkflow
 
 
@@ -26,7 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m orchestrator.codex_loop",
-        description="Run one feature request through Codex and independent validation.",
+        description="Run one task or an ordered task queue through Codex and validation.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -45,6 +49,45 @@ def build_parser() -> argparse.ArgumentParser:
     resume_parser = subparsers.add_parser("resume", help="resume a saved task")
     resume_parser.add_argument("--task-id")
     _add_timeout_argument(resume_parser)
+
+    review_parser = subparsers.add_parser(
+        "review", help="record a human review for a task or queue subtask"
+    )
+    review_parser.add_argument("--task-id", required=True)
+    review_parser.add_argument(
+        "--decision",
+        required=True,
+        choices=[
+            ReviewStatus.APPROVED.value,
+            ReviewStatus.CHANGES_REQUESTED.value,
+            ReviewStatus.REJECTED.value,
+        ],
+    )
+    review_parser.add_argument("--reviewer", required=True)
+    review_parser.add_argument("--comment", default="")
+    review_parser.add_argument("--reviewed-diff-sha256", required=True)
+
+    show_parser = subparsers.add_parser(
+        "show", help="show read-only workspace, permission, and audit metadata"
+    )
+    show_parser.add_argument("--task-id", required=True)
+
+    queue_start_parser = subparsers.add_parser(
+        "queue-start", help="start one manually split ordered task queue"
+    )
+    queue_start_parser.add_argument("--task-file", type=Path, required=True)
+    _add_timeout_argument(queue_start_parser)
+
+    queue_resume_parser = subparsers.add_parser(
+        "queue-resume", help="resume a queue stopped by an infrastructure error"
+    )
+    queue_resume_parser.add_argument("--queue-id")
+    _add_timeout_argument(queue_resume_parser)
+
+    queue_show_parser = subparsers.add_parser(
+        "queue-show", help="show ordered queue progress"
+    )
+    queue_show_parser.add_argument("--queue-id", required=True)
     return parser
 
 
@@ -61,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     store = StateStore(REPO_ROOT)
+    queue_store = QueueStore(REPO_ROOT)
 
     try:
         if args.command == "start":
@@ -76,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
                 validation_timeout_seconds=args.timeout_seconds,
             )
             result = workflow.start(task)
-        else:
+        elif args.command == "resume":
             task_id = args.task_id or _find_resumable_task_id(store)
             workflow = OrchestrationWorkflow(
                 REPO_ROOT,
@@ -84,10 +128,70 @@ def main(argv: list[str] | None = None) -> int:
                 validation_timeout_seconds=args.timeout_seconds,
             )
             result = workflow.resume(task_id)
+        elif args.command == "review":
+            queue_id = queue_store.find_queue_for_task(args.task_id)
+            if queue_id is None:
+                review = ReviewService(REPO_ROOT, store=store).record(
+                    args.task_id,
+                    decision=args.decision,
+                    reviewer=args.reviewer,
+                    comment=args.comment,
+                    reviewed_diff_sha256=args.reviewed_diff_sha256,
+                )
+                print(json.dumps(review.to_dict(), ensure_ascii=False, indent=2))
+            else:
+                workflow = QueueWorkflow(REPO_ROOT, queue_store=queue_store)
+                queue_state, review = workflow.record_review(
+                    queue_id,
+                    args.task_id,
+                    decision=args.decision,
+                    reviewer=args.reviewer,
+                    comment=args.comment,
+                    reviewed_diff_sha256=args.reviewed_diff_sha256,
+                )
+                if queue_state.status in {QueueStatus.PENDING, QueueStatus.RUNNING}:
+                    queue_state = workflow.run_current(queue_id)
+                print(
+                    json.dumps(
+                        {"review": review.to_dict(), "queue": queue_state.to_dict()},
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                )
+            return 0
+        elif args.command == "show":
+            _print_run_metadata(store, args.task_id)
+            return 0
+        elif args.command == "queue-start":
+            values = _queue_values_from_file(args.task_file)
+            queue_state = QueueWorkflow(
+                REPO_ROOT,
+                queue_store=queue_store,
+                validation_timeout_seconds=args.timeout_seconds,
+            ).start(
+                values["name"],
+                values["subtasks"],
+                queue_id=values.get("queue_id"),
+                base_ref=values.get("base_ref", "HEAD"),
+            )
+            _print_queue(queue_store, queue_state.queue_id)
+            return 0 if queue_state.status is QueueStatus.COMPLETED else 1
+        elif args.command == "queue-resume":
+            queue_id = args.queue_id or _find_resumable_queue_id(queue_store)
+            queue_state = QueueWorkflow(
+                REPO_ROOT,
+                queue_store=queue_store,
+                validation_timeout_seconds=args.timeout_seconds,
+            ).resume(queue_id)
+            _print_queue(queue_store, queue_id)
+            return 0 if queue_state.status is QueueStatus.COMPLETED else 1
+        else:
+            _print_queue(queue_store, args.queue_id)
+            return 0
     except ActiveRunError as exc:
         print(f"无法启动：{redact_sensitive_text(str(exc))}", file=sys.stderr)
         return 2
-    except (InfrastructureError, OSError, ValueError) as exc:
+    except (InfrastructureError, ReviewError, OSError, ValueError) as exc:
         print(f"编排器错误：{redact_sensitive_text(str(exc))}", file=sys.stderr)
         return 2
     except (EOFError, KeyboardInterrupt):
@@ -146,6 +250,24 @@ def _interactive_task_input() -> tuple[str, list[str]]:
     return requirement, criteria
 
 
+def _queue_values_from_file(path: Path) -> dict[str, Any]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("queue task file must contain a JSON object")
+    name = str(data.get("name", "")).strip()
+    subtasks = data.get("subtasks")
+    if not name:
+        raise ValueError("queue name cannot be blank")
+    if not isinstance(subtasks, list):
+        raise ValueError("queue subtasks must be a JSON array")
+    return {
+        "name": name,
+        "subtasks": subtasks,
+        "queue_id": data.get("queue_id"),
+        "base_ref": str(data.get("base_ref", "HEAD")),
+    }
+
+
 def _find_resumable_task_id(store: StateStore) -> str:
     candidates: list[RunState] = []
     if store.runs_root.is_dir():
@@ -163,6 +285,18 @@ def _find_resumable_task_id(store: StateStore) -> str:
         task_ids = ", ".join(sorted(state.task_id for state in candidates))
         raise ValueError(f"multiple unfinished tasks found; choose --task-id: {task_ids}")
     return candidates[0].task_id
+
+
+def _find_resumable_queue_id(store: QueueStore) -> str:
+    candidates = store.unfinished_queue_ids()
+    if not candidates:
+        raise ValueError("no unfinished queue is available to resume")
+    if len(candidates) > 1:
+        raise ValueError(
+            "multiple unfinished queues found; choose --queue-id: "
+            + ", ".join(candidates)
+        )
+    return candidates[0]
 
 
 def _record_invalid_configuration(
@@ -201,6 +335,59 @@ def _print_result(result: RunResult, store: StateStore) -> None:
     print(f"状态：{result.status.value}")
     print(f"报告：{run_dir / 'report.md'}")
     print(f"结果：{run_dir / 'result.json'}")
+
+
+def _print_run_metadata(store: StateStore, task_id: str) -> None:
+    run_dir = store.run_dir(task_id)
+    state = store.load_state(task_id)
+    data: dict[str, Any] = {
+        "task_id": task_id,
+        "schema_version": state.schema_version,
+        "machine_status": state.status.value,
+        "review_status": state.review_status.value,
+        "workspace": None,
+        "permissions": None,
+        "audit": {"event_count": 0, "denied_event_count": 0},
+    }
+    manifest_path = run_dir / "manifest.json"
+    permissions_path = run_dir / "permissions.json"
+    events_path = run_dir / "events.jsonl"
+    if manifest_path.is_file():
+        data["workspace"] = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if permissions_path.is_file():
+        data["permissions"] = json.loads(
+            permissions_path.read_text(encoding="utf-8")
+        )
+    if events_path.is_file():
+        events = [
+            json.loads(line)
+            for line in events_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        data["audit"] = {
+            "event_count": len(events),
+            "denied_event_count": sum(
+                event.get("type") == "permission.denied" for event in events
+            ),
+        }
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+
+
+def _print_queue(store: QueueStore, queue_id: str) -> None:
+    spec = store.load_spec(queue_id)
+    state = store.load_state(queue_id)
+    print(
+        json.dumps(
+            {
+                "queue": spec.to_dict(),
+                "state": state.to_dict(),
+                "report": str(store.queue_dir(queue_id) / "report.md"),
+                "cumulative_diff": str(store.cumulative_diff_path(queue_id)),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
 
 
 if __name__ == "__main__":

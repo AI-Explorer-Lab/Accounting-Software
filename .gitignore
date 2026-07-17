@@ -20,6 +20,7 @@ frontend/dist/
 orchestrator/node_modules/
 orchestrator/frontend/node_modules/
 orchestrator/frontend/dist/
+.codex-runtime/
 
 # IDE and OS
 .idea/

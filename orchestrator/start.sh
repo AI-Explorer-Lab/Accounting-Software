@@ -5,6 +5,8 @@ set -Eeuo pipefail
 ORCHESTRATOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${ORCHESTRATOR_DIR}/.." && pwd)"
 FRONTEND_DIR="${ORCHESTRATOR_DIR}/frontend"
+PUBLIC_PORT=8100
+BACKEND_PORT=18100
 BACKEND_PID=""
 FRONTEND_PID=""
 
@@ -60,16 +62,18 @@ trap 'exit 143' TERM
 
 cd "${REPO_ROOT}"
 
-printf '正在启动 Orchestrator 后端：http://127.0.0.1:8100\n'
+printf '正在启动 Orchestrator：http://127.0.0.1:%s\n' "${PUBLIC_PORT}"
 "${ACCOUNT_PYTHON}" -m uvicorn orchestrator.backend.main:app \
   --host 127.0.0.1 \
-  --port 8100 &
+  --port "${BACKEND_PORT}" &
 BACKEND_PID=$!
 
-printf '正在启动 Orchestrator 前端：http://127.0.0.1:5100\n'
 (
   cd "${FRONTEND_DIR}"
-  exec ./node_modules/.bin/vite --strictPort
+  ORCHESTRATOR_BACKEND_PORT="${BACKEND_PORT}" \
+    exec ./node_modules/.bin/vite \
+      --port "${PUBLIC_PORT}" \
+      --strictPort
 ) &
 FRONTEND_PID=$!
 

@@ -18,8 +18,9 @@ npm install
 npm run dev
 ```
 
-The development server runs at `http://127.0.0.1:5173` and proxies `/api`
-requests to the FastAPI backend at `http://127.0.0.1:8000`.
+The development server runs at `http://127.0.0.1:8101`. When started with the
+repository `start.sh`, it proxies `/api` requests to the FastAPI backend on the
+internal loopback port `18101`.
 
 ## Test and build
 

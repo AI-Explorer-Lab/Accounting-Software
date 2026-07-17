@@ -4,7 +4,7 @@ from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .models import TaskSnapshot
+from .models import QueueSnapshot, TaskSnapshot
 
 
 T = TypeVar("T")
@@ -30,10 +30,17 @@ class TaskData(BaseModel):
     requirement: str
     acceptance_criteria: list[str]
     status: str
+    schema_version: int = 1
+    legacy: bool = False
+    history_warning: str | None = None
+    machine_status: str | None = None
+    review_status: str = "pending"
     phase: str | None = None
     thread_id: str | None = None
     turn_count: int = 0
     failure_count: int = 0
+    cycle_turn_count: int = 0
+    cycle_failure_count: int = 0
     rounds: list[dict[str, Any]] = Field(default_factory=list)
     last_error_summary: str = ""
     infrastructure_error: str | None = None
@@ -41,7 +48,55 @@ class TaskData(BaseModel):
     updated_at: str = ""
     finished_at: str | None = None
     report_url: str | None = None
+    diff_url: str | None = None
+    workspace: dict[str, Any] = Field(default_factory=dict)
+    permissions: dict[str, Any] = Field(default_factory=dict)
+    audit_summary: dict[str, Any] = Field(default_factory=dict)
+    changed_files: list[dict[str, Any]] = Field(default_factory=list)
+    codex_responses: list[dict[str, Any]] = Field(default_factory=list)
+    final_diff_sha256: str = ""
+    diff_redaction_count: int = 0
+    review: dict[str, Any] | None = None
+    review_history: list[dict[str, Any]] = Field(default_factory=list)
+    queue_id: str | None = None
+    sequence: int | None = None
 
     @classmethod
     def from_snapshot(cls, snapshot: TaskSnapshot) -> "TaskData":
+        return cls.model_validate(snapshot.to_dict())
+
+
+class QueueSubtaskData(BaseModel):
+    task_id: str
+    sequence: int
+    requirement: str
+    acceptance_criteria: list[str]
+    status: str
+    machine_status: str | None = None
+    review_status: str
+    thread_id: str | None = None
+    last_error_summary: str = ""
+    updated_at: str
+
+
+class QueueData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    queue_id: str
+    name: str
+    status: str
+    base_ref: str
+    base_commit: str
+    current_task_id: str | None = None
+    cumulative_diff_sha256: str = ""
+    last_error_summary: str = ""
+    subtasks: list[QueueSubtaskData]
+    started_at: str
+    updated_at: str
+    finished_at: str | None = None
+    report_url: str | None = None
+    diff_url: str | None = None
+
+    @classmethod
+    def from_snapshot(cls, snapshot: QueueSnapshot) -> "QueueData":
         return cls.model_validate(snapshot.to_dict())

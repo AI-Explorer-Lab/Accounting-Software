@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -24,3 +26,40 @@ class TaskCreateRequest(BaseModel):
         if any(len(value) > 4_000 for value in normalized):
             raise ValueError("each acceptance criterion must be at most 4000 characters")
         return normalized
+
+
+class QueueSubtaskCreateRequest(TaskCreateRequest):
+    pass
+
+
+class QueueCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=500)
+    subtasks: list[QueueSubtaskCreateRequest] = Field(min_length=2, max_length=50)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("name cannot be blank")
+        return name
+
+
+class ReviewRequest(BaseModel):
+    decision: Literal["approved", "changes_requested", "rejected"]
+    reviewer: str = Field(min_length=1, max_length=200)
+    comment: str = Field(default="", max_length=10_000)
+    reviewed_diff_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("reviewer")
+    @classmethod
+    def validate_reviewer(cls, value: str) -> str:
+        reviewer = value.strip()
+        if not reviewer:
+            raise ValueError("reviewer cannot be blank")
+        return reviewer
+
+    @field_validator("comment")
+    @classmethod
+    def normalize_comment(cls, value: str) -> str:
+        return value.strip()

@@ -12,7 +12,7 @@ docker compose up -d database
 conda env create -f backend/environment.yml
 conda activate account
 cd backend
-uvicorn main:app --reload
+uvicorn main:app --reload --port 8101
 ```
 
 If the environment already exists, update it with:
@@ -21,8 +21,11 @@ If the environment already exists, update it with:
 conda env update -n account -f backend/environment.yml --prune
 ```
 
-The API documentation is available at `http://127.0.0.1:8000/docs`. The health
-endpoint is `http://127.0.0.1:8000/api/v1/health`.
+When the backend is run on its own, the API documentation is available at
+`http://127.0.0.1:8101/docs` and the health endpoint is
+`http://127.0.0.1:8101/api/v1/health`. The repository `start.sh` exposes the
+whole application on port `8101` and uses an internal backend port to avoid a
+collision with Vite.
 
 ## Create a transaction
 
