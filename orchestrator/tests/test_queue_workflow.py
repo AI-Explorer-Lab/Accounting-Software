@@ -486,3 +486,55 @@ def test_incomplete_codex_turn_restarts_its_recorded_prompt_before_validation(
     assert failed.status is QueueStatus.INFRASTRUCTURE_ERROR
     assert resumed.status is QueueStatus.WAITING_REVIEW
     assert observed_checkpoints == [(RunPhase.PROMPT_PENDING, PromptKind.INITIAL)]
+
+
+def test_paused_child_releases_queue_and_resumes_the_same_checkpoint(
+    repository: Path,
+) -> None:
+    starts = {"count": 0}
+
+    class PausesOnceWorkflow(CompletingWorkflow):
+        def start(self, task: TaskSpec) -> RunResult:
+            starts["count"] += 1
+            state = self.store.initialize_run(task)
+            state.thread_id = "thread-paused"
+            state.mark_paused()
+            self.store.save_state(state)
+            result = RunResult.from_run(task, state)
+            self.store.save_result(result)
+            return result
+
+        def resume(self, task_id: str) -> RunResult:
+            task = self.store.load_task(task_id)
+            state = self.store.load_state(task_id)
+            state.reopen_after_pause()
+            state.mark_success()
+            self.store.save_state(state)
+            result = RunResult.from_run(task, state)
+            self.store.save_result(result)
+            return result
+
+    def factory(
+        store: StateStore,
+        _base_commit: str,
+        _inherited_path: Path | None,
+        _inherited_sha: str,
+    ) -> PausesOnceWorkflow:
+        return PausesOnceWorkflow(store)
+
+    workflow = QueueWorkflow(repository, workflow_factory=factory)
+    prepared = workflow.prepare(
+        "Pause queue",
+        [subtask("first"), subtask("second")],
+        queue_id="queue-paused",
+    )
+
+    paused = workflow.run_current(prepared.queue_id)
+    resumed = workflow.resume(prepared.queue_id)
+
+    assert paused.status is QueueStatus.PAUSED
+    assert paused.subtasks[0].status is QueueTaskStatus.PAUSED
+    assert resumed.status is QueueStatus.WAITING_REVIEW
+    assert resumed.current_task_id == "queue-paused-task-01"
+    assert resumed.subtasks[0].status is QueueTaskStatus.WAITING_REVIEW
+    assert starts["count"] == 1

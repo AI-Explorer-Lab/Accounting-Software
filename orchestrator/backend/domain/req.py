@@ -63,3 +63,27 @@ class ReviewRequest(BaseModel):
     @classmethod
     def normalize_comment(cls, value: str) -> str:
         return value.strip()
+
+
+class QueueReorderRequest(BaseModel):
+    task_ids: list[str] = Field(min_length=1, max_length=50)
+    expected_updated_at: str | None = None
+
+    @field_validator("task_ids")
+    @classmethod
+    def validate_task_ids(cls, values: list[str]) -> list[str]:
+        normalized = [str(value).strip() for value in values]
+        if any(not value for value in normalized) or len(set(normalized)) != len(
+            normalized
+        ):
+            raise ValueError("task_ids must contain unique non-empty identifiers")
+        return normalized
+
+
+class NotificationSettingsRequest(BaseModel):
+    in_app: bool = True
+    browser: bool = True
+
+
+class QueueVersionRequest(BaseModel):
+    expected_updated_at: str | None = None

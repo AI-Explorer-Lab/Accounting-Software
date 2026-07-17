@@ -40,6 +40,7 @@ class TaskSnapshot:
     review_history: list[dict[str, Any]] = field(default_factory=list)
     queue_id: str | None = None
     sequence: int | None = None
+    rerun_of: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -77,6 +78,7 @@ class TaskSnapshot:
             "review_history": list(self.review_history),
             "queue_id": self.queue_id,
             "sequence": self.sequence,
+            "rerun_of": self.rerun_of,
         }
 
 
@@ -124,6 +126,7 @@ class QueueSnapshot:
     finished_at: str | None
     report_url: str | None = None
     diff_url: str | None = None
+    rerun_of: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -141,4 +144,5 @@ class QueueSnapshot:
             "finished_at": self.finished_at,
             "report_url": self.report_url,
             "diff_url": self.diff_url,
+            "rerun_of": self.rerun_of,
         }

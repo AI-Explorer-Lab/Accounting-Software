@@ -56,6 +56,7 @@ class QueueWorkflow:
         *,
         queue_id: str | None = None,
         base_ref: str = "HEAD",
+        rerun_of: str | None = None,
     ) -> QueueState:
         """Validate and persist a queue without blocking on Codex execution."""
 
@@ -65,6 +66,7 @@ class QueueWorkflow:
             subtasks,
             queue_id=queue_id,
             base_ref=base_ref,
+            rerun_of=rerun_of,
         )
         spec.base_commit = self._resolve_commit(spec.base_ref)
         return self.queue_store.initialize_queue(spec)
@@ -76,12 +78,14 @@ class QueueWorkflow:
         *,
         queue_id: str | None = None,
         base_ref: str = "HEAD",
+        rerun_of: str | None = None,
     ) -> QueueState:
         state = self.prepare(
             name,
             subtasks,
             queue_id=queue_id,
             base_ref=base_ref,
+            rerun_of=rerun_of,
         )
         return self.run_current(state.queue_id)
 
@@ -90,7 +94,10 @@ class QueueWorkflow:
 
         spec = self.queue_store.load_spec(queue_id)
         state = self.queue_store.load_state(queue_id)
-        if state.status.is_final or state.status is QueueStatus.WAITING_REVIEW:
+        if state.status.is_final or state.status in {
+            QueueStatus.WAITING_REVIEW,
+            QueueStatus.PAUSED,
+        }:
             return state
 
         if state.current_task_id is not None:
@@ -100,10 +107,7 @@ class QueueWorkflow:
         else:
             child = state.next_pending()
             if child is None:
-                if all(
-                    item.status is QueueTaskStatus.COMPLETED
-                    for item in state.subtasks
-                ):
+                if self._all_done(state):
                     state.status = QueueStatus.COMPLETED
                     state.finished_at = utc_now_iso()
                     self.queue_store.save_state(state)
@@ -122,12 +126,17 @@ class QueueWorkflow:
             {"task_id": child.task_id, "sequence": child.sequence},
         )
 
-        task = self._task_spec(spec, child.task_id)
+        task = self._task_spec(spec, child.task_id, sequence=child.sequence)
         store = self.queue_store.subtask_store(queue_id)
         try:
             inherited_path: Path | None = None
             inherited_sha = ""
-            if child.sequence > 1:
+            has_approved_predecessor = any(
+                item.sequence < child.sequence
+                and item.status is QueueTaskStatus.COMPLETED
+                for item in state.subtasks
+            )
+            if has_approved_predecessor:
                 inherited_path = self.queue_store.cumulative_diff_path(queue_id)
                 inherited_sha = state.cumulative_diff_sha256
                 if not inherited_sha:
@@ -177,7 +186,20 @@ class QueueWorkflow:
         child.thread_id = result.thread_id
         child.last_error_summary = result.infrastructure_error or ""
         child.updated_at = utc_now_iso()
-        if result.status is RunStatus.INFRASTRUCTURE_ERROR:
+        if result.status is RunStatus.PAUSED:
+            child.status = QueueTaskStatus.PAUSED
+            state.status = QueueStatus.PAUSED
+            state.last_error_summary = ""
+            event_type = "subtask.paused"
+            self.queue_store.clear_control(queue_id)
+        elif result.status is RunStatus.CANCELLED:
+            child.status = QueueTaskStatus.CANCELLED
+            state.status = QueueStatus.CANCELLED
+            state.finished_at = utc_now_iso()
+            state.last_error_summary = ""
+            event_type = "subtask.cancelled"
+            self.queue_store.clear_control(queue_id)
+        elif result.status is RunStatus.INFRASTRUCTURE_ERROR:
             child.status = QueueTaskStatus.INFRASTRUCTURE_ERROR
             state.status = QueueStatus.INFRASTRUCTURE_ERROR
             state.last_error_summary = result.infrastructure_error or ""
@@ -255,9 +277,7 @@ class QueueWorkflow:
                 raise InfrastructureError(message) from exc
             child.status = QueueTaskStatus.COMPLETED
             state.current_task_id = None
-            if all(
-                item.status is QueueTaskStatus.COMPLETED for item in state.subtasks
-            ):
+            if self._all_done(state):
                 state.status = QueueStatus.COMPLETED
                 state.finished_at = utc_now_iso()
             else:
@@ -292,6 +312,23 @@ class QueueWorkflow:
 
     def resume(self, queue_id: str) -> QueueState:
         state = self.queue_store.load_state(queue_id)
+        if state.status is QueueStatus.PAUSED:
+            if state.current_task_id is None:
+                state.status = QueueStatus.PENDING
+            else:
+                child = state.task(state.current_task_id)
+                if child.status is QueueTaskStatus.PAUSED:
+                    child.status = QueueTaskStatus.RUNNING
+                state.status = QueueStatus.RUNNING
+            state.finished_at = None
+            state.last_error_summary = ""
+            self.queue_store.clear_control(queue_id)
+            self.queue_store.save_state(state)
+            self.queue_store.append_event(
+                queue_id,
+                "queue.resumed",
+                {"task_id": state.current_task_id},
+            )
         if state.status is QueueStatus.INFRASTRUCTURE_ERROR:
             if state.current_task_id is None:
                 raise InfrastructureError("queue has no current subtask to resume")
@@ -302,10 +339,7 @@ class QueueWorkflow:
                 child.last_error_summary = ""
                 state.current_task_id = None
                 state.last_error_summary = ""
-                if all(
-                    item.status is QueueTaskStatus.COMPLETED
-                    for item in state.subtasks
-                ):
+                if self._all_done(state):
                     state.status = QueueStatus.COMPLETED
                     state.finished_at = utc_now_iso()
                 else:
@@ -361,6 +395,16 @@ class QueueWorkflow:
             state.last_error_summary = ""
             self.queue_store.save_state(state)
         return self.run_current(queue_id)
+
+    @staticmethod
+    def _all_done(state: QueueState) -> bool:
+        return all(
+            item.status in {
+                QueueTaskStatus.COMPLETED,
+                QueueTaskStatus.SKIPPED,
+            }
+            for item in state.subtasks
+        )
 
     def _default_workflow(
         self,
@@ -430,10 +474,19 @@ class QueueWorkflow:
         return source
 
     @staticmethod
-    def _task_spec(spec: TaskQueueSpec, task_id: str) -> TaskSpec:
+    def _task_spec(
+        spec: TaskQueueSpec,
+        task_id: str,
+        *,
+        sequence: int | None = None,
+    ) -> TaskSpec:
         for task in spec.subtasks:
             if task.task_id == task_id:
-                return task
+                if sequence is None or sequence == task.sequence:
+                    return task
+                values = task.to_dict()
+                values["sequence"] = sequence
+                return TaskSpec.from_dict(values)
         raise ValueError(f"unknown queue subtask: {task_id}")
 
     def _resolve_commit(self, base_ref: str) -> str:

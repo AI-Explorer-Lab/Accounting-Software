@@ -4,6 +4,10 @@ from enum import StrEnum
 class ApiTaskStatus(StrEnum):
     ACCEPTED = "accepted"
     RUNNING = "running"
+    PAUSING = "pausing"
+    PAUSED = "paused"
+    CANCELLING = "cancelling"
+    CANCELLED = "cancelled"
     SUCCESS = "success"
     MANUAL_REVIEW = "manual_review"
     INFRASTRUCTURE_ERROR = "infrastructure_error"
@@ -18,4 +22,5 @@ class ErrorCode(StrEnum):
     INVALID_QUEUE_ID = "INVALID_QUEUE_ID"
     QUEUE_NOT_FOUND = "QUEUE_NOT_FOUND"
     QUEUE_NOT_READY = "QUEUE_NOT_READY"
+    PROJECT_NOT_FOUND = "PROJECT_NOT_FOUND"
     INTERNAL_ERROR = "INTERNAL_ERROR"

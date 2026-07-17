@@ -85,3 +85,12 @@ class QueueNotReadyError(BusinessException):
             code=ErrorCode.QUEUE_NOT_READY,
             status_code=409,
         )
+
+
+class ProjectNotFoundError(BusinessException):
+    def __init__(self, project_id: str) -> None:
+        super().__init__(
+            f"Project not found: {project_id}",
+            code=ErrorCode.PROJECT_NOT_FOUND,
+            status_code=404,
+        )

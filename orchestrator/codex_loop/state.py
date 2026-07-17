@@ -17,12 +17,15 @@ from typing import Any, Iterator, Mapping
 from uuid import uuid4
 
 from .models import (
+    QUEUE_SCHEMA_VERSION,
+    SCHEMA_VERSION,
     CommandResult,
     QueueState,
     QueueStatus,
     ReviewRecord,
     RunResult,
     RunState,
+    RunStatus,
     TaskQueueSpec,
     TaskSpec,
     ValidationRound,
@@ -313,6 +316,68 @@ class StateStore:
     def load_state(self, task_id: str) -> RunState:
         return RunState.from_dict(_read_json(self.run_dir(task_id) / "state.json"))
 
+    def control_path(self, task_id: str) -> Path:
+        return self.run_dir(task_id) / "control.json"
+
+    def request_control(self, task_id: str, action: str) -> dict[str, Any]:
+        normalized = str(action).strip().lower()
+        if normalized not in {"pause", "cancel"}:
+            raise ValueError("control action must be pause or cancel")
+        request = {
+            "schema_version": SCHEMA_VERSION,
+            "task_id": task_id,
+            "action": normalized,
+            "requested_at": utc_now_iso(),
+        }
+        _atomic_write_json(self.control_path(task_id), request)
+        return request
+
+    def load_control(self, task_id: str) -> dict[str, Any] | None:
+        path = self.control_path(task_id)
+        return _read_json(path) if path.is_file() else None
+
+    def clear_control(self, task_id: str) -> None:
+        self.control_path(task_id).unlink(missing_ok=True)
+
+    def append_event(
+        self,
+        task_id: str,
+        event_type: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        source: str = "orchestrator",
+    ) -> dict[str, Any]:
+        """Append a redacted event when no workflow AuditRecorder is active."""
+
+        path = self.run_dir(task_id) / "events.jsonl"
+        sequence = 1
+        if path.is_file():
+            sequence = len(
+                [line for line in path.read_text(encoding="utf-8").splitlines() if line]
+            ) + 1
+        event = redact_sensitive_data(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "seq": sequence,
+                "timestamp": utc_now_iso(),
+                "source": source,
+                "type": event_type,
+                "turn_number": None,
+                "round_number": None,
+                "payload": dict(payload or {}),
+                "redacted": True,
+            }
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n"
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(descriptor, line.encode("utf-8"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return event
+
     def save_result(self, result: RunResult) -> Path:
         path = self.run_dir(result.task_id) / "result.json"
         _atomic_write_json(path, result.to_dict())
@@ -398,7 +463,7 @@ class StateStore:
             if task_id == excluding:
                 continue
             state = RunState.from_dict(_read_json(state_path))
-            if not state.status.is_final:
+            if not state.status.is_final or state.status is RunStatus.PAUSED:
                 task_ids.append(task_id)
         return task_ids
 
@@ -575,7 +640,11 @@ class QueueStore:
         state = QueueState.from_spec(spec)
         self.save_spec(spec)
         self.save_state(state)
-        self.append_event(spec.queue_id, "queue.created", {"name": spec.name})
+        self.append_event(
+            spec.queue_id,
+            "queue.created",
+            {"name": spec.name, "rerun_of": spec.rerun_of},
+        )
         return state
 
     def save_spec(self, spec: TaskQueueSpec) -> Path:
@@ -600,6 +669,29 @@ class QueueStore:
     def load_state(self, queue_id: str) -> QueueState:
         return QueueState.from_dict(_read_json(self.queue_dir(queue_id) / "state.json"))
 
+    def control_path(self, queue_id: str) -> Path:
+        return self.queue_dir(queue_id) / "control.json"
+
+    def request_control(self, queue_id: str, action: str) -> dict[str, Any]:
+        normalized = str(action).strip().lower()
+        if normalized not in {"pause", "cancel"}:
+            raise ValueError("control action must be pause or cancel")
+        request = {
+            "schema_version": QUEUE_SCHEMA_VERSION,
+            "queue_id": queue_id,
+            "action": normalized,
+            "requested_at": utc_now_iso(),
+        }
+        _atomic_write_json(self.control_path(queue_id), request)
+        return request
+
+    def load_control(self, queue_id: str) -> dict[str, Any] | None:
+        path = self.control_path(queue_id)
+        return _read_json(path) if path.is_file() else None
+
+    def clear_control(self, queue_id: str) -> None:
+        self.control_path(queue_id).unlink(missing_ok=True)
+
     def unfinished_queue_ids(self, *, excluding: str | None = None) -> list[str]:
         if not self.queues_root.is_dir():
             return []
@@ -609,7 +701,7 @@ class QueueStore:
             if queue_id == excluding:
                 continue
             state = QueueState.from_dict(_read_json(state_path))
-            if not state.status.is_final:
+            if not state.status.is_final or state.status is QueueStatus.PAUSED:
                 queue_ids.append(queue_id)
         return queue_ids
 

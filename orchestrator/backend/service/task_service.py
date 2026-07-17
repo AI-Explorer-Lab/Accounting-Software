@@ -64,10 +64,13 @@ class TaskService:
         self,
         requirement: str,
         acceptance_criteria: list[str],
+        *,
+        rerun_of: str | None = None,
     ) -> TaskSnapshot:
         task = TaskSpec(
             requirement=requirement,
             acceptance_criteria=acceptance_criteria,
+            rerun_of=rerun_of,
         )
         with self._submission_lock:
             self._ensure_available()
@@ -92,7 +95,18 @@ class TaskService:
             raise TaskNotFoundError(task_id)
         if not record.future.done():
             if record.task is not None:
-                return self._accepted_snapshot(record.task)
+                accepted = self._accepted_snapshot(record.task)
+                control = mapper.store.load_control(task_id)
+                if control is None:
+                    return accepted
+                values = accepted.to_dict()
+                projected = (
+                    "pausing"
+                    if control.get("action") == "pause"
+                    else "cancelling"
+                )
+                values.update(status=projected, machine_status=projected)
+                return TaskSnapshot(**values)
             raise TaskNotFoundError(task_id)
 
         error = record.future.exception()
@@ -120,7 +134,7 @@ class TaskService:
         snapshot = mapper.load_snapshot(task_id)
         if task is None or snapshot is None:
             raise TaskNotFoundError(task_id)
-        if snapshot.status != ApiTaskStatus.RUNNING.value:
+        if snapshot.status not in {ApiTaskStatus.RUNNING.value, "paused"}:
             return snapshot
 
         with self._submission_lock:
@@ -137,6 +151,85 @@ class TaskService:
             except RuntimeError as exc:
                 raise TaskConflictError(str(exc)) from exc
         return snapshot
+
+    def request_control(self, task_id: str, action: str) -> TaskSnapshot:
+        self._validate_task_id(task_id)
+        mapper, queue_id = self._mapper_for_task(task_id)
+        if queue_id is not None:
+            raise TaskConflictError(
+                f"Queued subtask must be controlled through queue {queue_id}"
+            )
+        task = mapper.load_task(task_id)
+        snapshot = mapper.load_snapshot(task_id)
+        normalized = str(action).strip().lower()
+        if normalized not in {"pause", "cancel"}:
+            raise TaskConflictError("Unsupported task control action")
+        if task is None or snapshot is None:
+            record = self.executor.get(task_id)
+            if (
+                record is None
+                or record.future.done()
+                or record.task is None
+            ):
+                raise TaskNotFoundError(task_id)
+            mapper.store.request_control(task_id, normalized)
+            accepted = self._accepted_snapshot(record.task)
+            values = accepted.to_dict()
+            projected = "pausing" if normalized == "pause" else "cancelling"
+            values.update(status=projected, machine_status=projected)
+            return TaskSnapshot(**values)
+        state = mapper.store.load_state(task_id)
+        if state.status.value in {
+            "success",
+            "manual_review",
+            "infrastructure_error",
+            "cancelled",
+        }:
+            raise TaskConflictError(
+                f"Task {task_id} cannot be {normalized}d from {state.status.value}"
+            )
+        if state.status.value == "paused" and normalized == "pause":
+            return snapshot
+        active = self.executor.active_task_id() == task_id
+        if active:
+            mapper.store.request_control(task_id, normalized)
+        else:
+            if normalized == "pause":
+                state.mark_paused()
+                event_type = "run.paused"
+            else:
+                state.mark_cancelled()
+                event_type = "run.cancelled"
+            mapper.store.clear_control(task_id)
+            mapper.store.save_state(state)
+            mapper.store.append_event(
+                task_id,
+                event_type,
+                {"checkpoint": state.phase.value, "inactive_executor": True},
+            )
+        updated = mapper.load_snapshot(task_id)
+        if updated is None:  # pragma: no cover - persisted task was checked above
+            raise TaskNotFoundError(task_id)
+        return updated
+
+    def rerun_task(self, task_id: str) -> TaskSnapshot:
+        self._validate_task_id(task_id)
+        mapper, queue_id = self._mapper_for_task(task_id)
+        if queue_id is not None:
+            raise TaskConflictError(
+                f"Queued subtask must be rerun through queue {queue_id}"
+            )
+        task = mapper.load_task(task_id)
+        snapshot = mapper.load_snapshot(task_id)
+        if task is None or snapshot is None:
+            raise TaskNotFoundError(task_id)
+        if snapshot.status in {"running", "pausing", "paused", "cancelling"}:
+            raise TaskConflictError("An unfinished task cannot be rerun")
+        return self.start_task(
+            task.requirement,
+            list(task.acceptance_criteria),
+            rerun_of=task_id,
+        )
 
     def get_report(self, task_id: str) -> str:
         self._validate_task_id(task_id)
@@ -253,4 +346,5 @@ class TaskService:
             status=ApiTaskStatus.ACCEPTED.value,
             started_at=task.created_at,
             updated_at=task.created_at,
+            rerun_of=task.rerun_of,
         )

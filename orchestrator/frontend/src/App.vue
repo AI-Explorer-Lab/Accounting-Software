@@ -1,331 +1,148 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from "vue";
+import { useRoute, useRouter } from "vue-router";
 
-import {
-  createQueue,
-  getQueue,
-  getQueueDiff,
-  getQueueReport,
-} from "./api/queues";
-import {
-  createTask,
-  getTask,
-  getTaskDiff,
-  getTaskReport,
-  submitTaskReview,
-} from "./api/tasks";
-import QueueForm from "./components/QueueForm.vue";
-import QueueProgress from "./components/QueueProgress.vue";
-import ReportPanel from "./components/ReportPanel.vue";
-import TaskForm from "./components/TaskForm.vue";
-import TaskStatus from "./components/TaskStatus.vue";
-import ValidationRounds from "./components/ValidationRounds.vue";
-import type {
-  QueueCreatePayload,
-  QueueData,
-  ReviewDecision,
-  TaskCreatePayload,
-  TaskData,
-} from "./types/task";
+import { provideOrchestrator } from "./composables/useOrchestrator";
+import type { NotificationData } from "./types/task";
 
+const store = provideOrchestrator();
+const route = useRoute();
+const router = useRouter();
+const notificationsOpen = ref(false);
+let notificationTimer: ReturnType<typeof setInterval> | null = null;
 
-const TASK_STORAGE_KEY = "codex-orchestrator:last-task-id";
-const QUEUE_STORAGE_KEY = "codex-orchestrator:last-queue-id";
-const LAST_KIND_STORAGE_KEY = "codex-orchestrator:last-kind";
-const POLL_INTERVAL_MS = 2_000;
-const FINAL_TASK_STATUSES = new Set<TaskData["status"]>([
-  "success",
-  "manual_review",
-  "infrastructure_error",
-]);
-const ACTIVE_QUEUE_STATUSES = new Set<QueueData["status"]>([
-  "pending",
-  "running",
-  "waiting_review",
-  "infrastructure_error",
-]);
-
-const mode = ref<"single" | "queue">("single");
-const task = ref<TaskData | null>(null);
-const queue = ref<QueueData | null>(null);
-const report = ref("");
-const diff = ref("");
-const queueReport = ref("");
-const queueDiff = ref("");
-const submitting = ref(false);
-const reviewing = ref(false);
-const pageError = ref("");
-let pollTimer: ReturnType<typeof setTimeout> | null = null;
-
-const taskIsActive = computed(
-  () =>
-    submitting.value ||
-    task.value?.status === "accepted" ||
-    task.value?.status === "running" ||
-    (queue.value !== null && ACTIVE_QUEUE_STATUSES.has(queue.value.status)),
+const pageTitle = computed(() => String(route.meta.title || "工作台"));
+const runCaption = computed(() => {
+  if (!store.hasRun.value) return "没有选中的运行";
+  return `${store.currentKind.value === "queue" ? "长任务" : "单任务"} · ${store.identifier.value}`;
+});
+const statusLabels: Record<string, string> = {
+  accepted: "已接收",
+  pending: "等待启动",
+  running: "执行中",
+  pausing: "正在暂停",
+  paused: "已暂停",
+  cancelling: "正在取消",
+  cancelled: "已取消",
+  success: "验证通过",
+  manual_review: "需人工处理",
+  waiting_review: "等待审查",
+  completed: "已完成",
+  rejected: "已驳回",
+  infrastructure_error: "环境故障",
+};
+const statusLabel = computed(() =>
+  store.runStatus.value ? statusLabels[store.runStatus.value] || store.runStatus.value : "无运行",
 );
 
-function clearPollTimer(): void {
-  if (pollTimer !== null) {
-    clearTimeout(pollTimer);
-    pollTimer = null;
-  }
+async function changeProject(event: Event): Promise<void> {
+  await store.selectProject((event.target as HTMLSelectElement).value);
 }
 
-function scheduleTaskPoll(taskId: string): void {
-  clearPollTimer();
-  pollTimer = setTimeout(() => void refreshTask(taskId), POLL_INTERVAL_MS);
+async function openNotification(notification: NotificationData): Promise<void> {
+  await store.readNotification(notification);
+  notificationsOpen.value = false;
+  await router.push(notification.category === "waiting_review" ? "/review" : "/monitor");
 }
 
-function scheduleQueuePoll(queueId: string): void {
-  clearPollTimer();
-  pollTimer = setTimeout(() => void refreshQueue(queueId), POLL_INTERVAL_MS);
+function formatTime(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN");
 }
 
-async function loadTaskArtifacts(taskId: string): Promise<void> {
-  try {
-    const requests: Promise<void>[] = [];
-    if (task.value?.report_url) {
-      requests.push(getTaskReport(taskId).then((value) => { report.value = value; }));
-    }
-    if (task.value?.diff_url) {
-      requests.push(getTaskDiff(taskId).then((value) => { diff.value = value; }));
-    } else {
-      diff.value = "";
-    }
-    await Promise.all(requests);
-  } catch (error) {
-    pageError.value = error instanceof Error ? error.message : "任务记录读取失败。";
-  }
-}
-
-async function loadQueueArtifacts(queueId: string): Promise<void> {
-  try {
-    const requests: Promise<void>[] = [];
-    if (queue.value?.report_url) {
-      requests.push(getQueueReport(queueId).then((value) => { queueReport.value = value; }));
-    }
-    if (queue.value?.diff_url) {
-      requests.push(getQueueDiff(queueId).then((value) => { queueDiff.value = value; }));
-    }
-    await Promise.all(requests);
-  } catch (error) {
-    pageError.value = error instanceof Error ? error.message : "长任务记录读取失败。";
-  }
-}
-
-async function refreshTask(taskId: string): Promise<void> {
-  try {
-    const latest = await getTask(taskId);
-    task.value = latest;
-    pageError.value = "";
-    if (FINAL_TASK_STATUSES.has(latest.status)) {
-      clearPollTimer();
-      await loadTaskArtifacts(taskId);
-      return;
-    }
-    scheduleTaskPoll(taskId);
-  } catch (error) {
-    pageError.value = error instanceof Error ? error.message : "任务状态读取失败。";
-    scheduleTaskPoll(taskId);
-  }
-}
-
-async function loadQueueTask(taskId: string): Promise<void> {
-  try {
-    const latest = await getTask(taskId);
-    task.value = latest;
-    if (FINAL_TASK_STATUSES.has(latest.status)) {
-      await loadTaskArtifacts(taskId);
-    }
-  } catch {
-    // The queue can be persisted just before its child run directory appears.
-  }
-}
-
-async function refreshQueue(queueId: string): Promise<void> {
-  try {
-    const latest = await getQueue(queueId);
-    queue.value = latest;
-    pageError.value = "";
-    if (latest.current_task_id) {
-      await loadQueueTask(latest.current_task_id);
-    }
-    await loadQueueArtifacts(queueId);
-    if (latest.status === "pending" || latest.status === "running") {
-      scheduleQueuePoll(queueId);
-      return;
-    }
-    clearPollTimer();
-  } catch (error) {
-    pageError.value = error instanceof Error ? error.message : "长任务状态读取失败。";
-    scheduleQueuePoll(queueId);
-  }
-}
-
-async function submitTask(payload: TaskCreatePayload): Promise<void> {
-  submitting.value = true;
-  resetDisplayedRun();
-  try {
-    const accepted = await createTask(payload);
-    task.value = accepted;
-    localStorage.setItem(TASK_STORAGE_KEY, accepted.task_id);
-    localStorage.setItem(LAST_KIND_STORAGE_KEY, "single");
-    scheduleTaskPoll(accepted.task_id);
-  } catch (error) {
-    pageError.value = error instanceof Error ? error.message : "任务提交失败。";
-  } finally {
-    submitting.value = false;
-  }
-}
-
-async function submitQueue(payload: QueueCreatePayload): Promise<void> {
-  submitting.value = true;
-  resetDisplayedRun();
-  try {
-    const accepted = await createQueue(payload);
-    queue.value = accepted;
-    localStorage.setItem(QUEUE_STORAGE_KEY, accepted.queue_id);
-    localStorage.setItem(LAST_KIND_STORAGE_KEY, "queue");
-    scheduleQueuePoll(accepted.queue_id);
-  } catch (error) {
-    pageError.value = error instanceof Error ? error.message : "长任务提交失败。";
-  } finally {
-    submitting.value = false;
-  }
-}
-
-function resetDisplayedRun(): void {
-  pageError.value = "";
-  report.value = "";
-  diff.value = "";
-  queueReport.value = "";
-  queueDiff.value = "";
-  task.value = null;
-  queue.value = null;
-  clearPollTimer();
-}
-
-async function submitReview(payload: {
-  decision: ReviewDecision;
-  reviewer: string;
-  comment: string;
-}): Promise<void> {
-  if (!task.value) return;
-  reviewing.value = true;
-  pageError.value = "";
-  try {
-    task.value = await submitTaskReview(task.value.task_id, {
-      ...payload,
-      reviewed_diff_sha256: task.value.final_diff_sha256,
-    });
-    if (queue.value) {
-      await refreshQueue(queue.value.queue_id);
-    } else {
-      await loadTaskArtifacts(task.value.task_id);
-    }
-  } catch (error) {
-    pageError.value = error instanceof Error ? error.message : "审查提交失败。";
-  } finally {
-    reviewing.value = false;
-  }
-}
-
-onMounted(() => {
-  const lastKind = localStorage.getItem(LAST_KIND_STORAGE_KEY);
-  const previousQueueId = localStorage.getItem(QUEUE_STORAGE_KEY);
-  const previousTaskId = localStorage.getItem(TASK_STORAGE_KEY);
-  if (lastKind === "queue" && previousQueueId) {
-    mode.value = "queue";
-    void refreshQueue(previousQueueId);
-  } else if (previousTaskId) {
-    void refreshTask(previousTaskId);
-  }
+onMounted(async () => {
+  await store.initialize();
+  notificationTimer = setInterval(() => void store.refreshNotifications(), 15_000);
 });
 
-onUnmounted(clearPollTimer);
+onUnmounted(() => {
+  if (notificationTimer !== null) clearInterval(notificationTimer);
+  store.dispose();
+});
 </script>
 
 <template>
-  <div class="app-shell">
-    <header class="hero">
-      <div class="hero-copy">
-        <p class="eyebrow">LOCAL DEVELOPMENT WORKFLOW</p>
-        <h1>把需求交给 Codex，<br />把过程留在眼前。</h1>
-        <p class="hero-description">
-          单个功能可以直接执行；长任务由你拆成有顺序的子任务，逐个通过机器验证和人工审查后继续。
-        </p>
+  <div class="workbench-shell" data-test="app-shell">
+    <svg class="icon-library" aria-hidden="true">
+      <symbol id="icon-create" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></symbol>
+      <symbol id="icon-monitor" viewBox="0 0 24 24"><path d="M4 12h3l2-5 4 10 2-5h5" /></symbol>
+      <symbol id="icon-changes" viewBox="0 0 24 24"><path d="M8 5 4 9l4 4M16 11l4 4-4 4M14 4l-4 16" /></symbol>
+      <symbol id="icon-review" viewBox="0 0 24 24"><path d="M5 12l4 4L19 6" /></symbol>
+      <symbol id="icon-history" viewBox="0 0 24 24"><path d="M4 6v5h5M5 11a8 8 0 1 0 2-5M12 8v5l3 2" /></symbol>
+      <symbol id="icon-projects" viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v10H4z" /></symbol>
+      <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4" /></symbol>
+      <symbol id="icon-bell" viewBox="0 0 24 24"><path d="M6 17h12l-1.5-2V10a4.5 4.5 0 0 0-9 0v5zM10 20h4" /></symbol>
+    </svg>
+
+    <aside class="sidebar">
+      <RouterLink class="brand" to="/create" aria-label="Codex Orchestrator 首页">
+        <span class="brand-mark"><i /><i /><i /></span>
+        <span><strong>Orchestrator</strong><small>Codex Workbench</small></span>
+      </RouterLink>
+
+      <nav class="primary-nav" aria-label="工作流程">
+        <span class="nav-label">工作流程</span>
+        <RouterLink to="/create"><svg><use href="#icon-create" /></svg><span>新建任务</span></RouterLink>
+        <RouterLink to="/monitor"><svg><use href="#icon-monitor" /></svg><span>执行监控</span><i v-if="store.isRunning.value" class="nav-live-dot" /></RouterLink>
+        <RouterLink to="/changes"><svg><use href="#icon-changes" /></svg><span>代码变更</span></RouterLink>
+        <RouterLink to="/review"><svg><use href="#icon-review" /></svg><span>人工审查</span><b v-if="store.needsReview.value" class="nav-badge">1</b></RouterLink>
+      </nav>
+
+      <nav class="secondary-nav" aria-label="工作台">
+        <span class="nav-label">工作台</span>
+        <RouterLink to="/history"><svg><use href="#icon-history" /></svg><span>历史</span></RouterLink>
+        <RouterLink to="/projects"><svg><use href="#icon-projects" /></svg><span>项目</span></RouterLink>
+        <RouterLink to="/settings"><svg><use href="#icon-settings" /></svg><span>设置</span></RouterLink>
+      </nav>
+
+      <div class="sidebar-runtime">
+        <div class="runtime-head"><span>本地运行服务</span><i :class="{ active: !store.pageError.value }" /></div>
+        <strong>{{ store.activeProject.value?.name || "正在连接" }}</strong>
+        <small>{{ runCaption }}</small>
       </div>
-      <div class="hero-mark" aria-hidden="true">
-        <span>01</span><div /><span>CODEX</span>
-      </div>
-    </header>
+    </aside>
 
-    <main>
-      <section class="panel form-panel">
-        <div class="panel-heading">
-          <div>
-            <p class="eyebrow">新任务</p>
-            <h2>描述你希望完成的功能</h2>
-          </div>
-          <span class="local-pill">仅在本机运行</span>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="topbar-identity"><strong>Codex Orchestrator</strong><b>/</b><span>{{ pageTitle }}</span></div>
+        <div class="topbar-run-context">
+          <span>{{ store.hasRun.value ? store.currentTitle.value : "尚未创建任务" }}</span>
+          <code v-if="store.identifier.value">{{ store.identifier.value }}</code>
+          <i class="status-chip" :class="`status-${store.runStatus.value || 'empty'}`">{{ statusLabel }}</i>
         </div>
-        <div class="mode-switch" role="tablist" aria-label="任务类型">
-          <button
-            type="button"
-            :class="{ active: mode === 'single' }"
-            :disabled="taskIsActive"
-            data-test="single-mode"
-            @click="mode = 'single'"
-          >单任务</button>
-          <button
-            type="button"
-            :class="{ active: mode === 'queue' }"
-            :disabled="taskIsActive"
-            data-test="queue-mode"
-            @click="mode = 'queue'"
-          >长任务</button>
+        <div class="topbar-actions">
+          <button class="connection-button" type="button" :class="`connection-${store.connectionState.value}`" :title="store.healthError.value || `后端 ${store.health.value?.version || ''}`" @click="store.checkHealth()">
+            <i />{{ store.connectionState.value === 'connected' ? '服务已连接' : store.connectionState.value === 'checking' ? '正在检查' : '服务未连接' }}
+          </button>
+          <label class="project-select-label">
+            <span>项目</span>
+            <select data-test="project-select" :value="store.activeProjectId.value" @change="changeProject">
+              <option v-for="project in store.projects.value" :key="project.project_id" :value="project.project_id">{{ project.name }}</option>
+            </select>
+          </label>
+          <button class="notification-button" type="button" aria-label="刷新当前任务" :disabled="!store.hasRun.value" @click="store.refreshCurrent()">↻</button>
+          <button class="notification-button" type="button" aria-label="通知中心" :aria-expanded="notificationsOpen" @click="notificationsOpen = !notificationsOpen">
+            <svg><use href="#icon-bell" /></svg><span v-if="store.unreadCount.value">{{ store.unreadCount.value > 9 ? '9+' : store.unreadCount.value }}</span>
+          </button>
         </div>
-        <TaskForm
-          v-if="mode === 'single'"
-          :disabled="taskIsActive"
-          @submit="submitTask"
-        />
-        <QueueForm v-else :disabled="taskIsActive" @submit="submitQueue" />
-        <p v-if="pageError" class="page-error" role="alert">{{ pageError }}</p>
-      </section>
+      </header>
 
-      <QueueProgress v-if="queue" :queue="queue" />
-      <TaskStatus v-if="task" :task="task" />
-      <ValidationRounds v-if="task" :rounds="task.rounds" />
-      <ReportPanel
-        v-if="task && FINAL_TASK_STATUSES.has(task.status)"
-        :task="task"
-        :report="report"
-        :diff="diff"
-        :submitting-review="reviewing"
-        @review="submitReview"
-      />
-      <section
-        v-if="queue && (queue.status === 'completed' || queue.status === 'rejected')"
-        class="panel report-panel"
-        data-test="queue-report"
-      >
-        <div class="panel-heading compact-heading">
-          <div><p class="eyebrow">长任务交付</p><h2>完整队列报告</h2></div>
-        </div>
-        <pre>{{ queueReport || "报告正在生成。" }}</pre>
-        <div class="review-section">
-          <h3>最终累计 Diff</h3>
-          <p class="hash-copy">SHA-256：<code>{{ queue.cumulative_diff_sha256 || "—" }}</code></p>
-          <pre class="diff-view">{{ queueDiff || "（无差异）" }}</pre>
-        </div>
-      </section>
-    </main>
+      <main class="workspace-content">
+        <div v-if="store.pageError.value" class="global-error" role="alert"><strong>需要处理</strong><span>{{ store.pageError.value }}</span><button type="button" aria-label="关闭错误" @click="store.pageError.value = ''">×</button></div>
+        <RouterView />
+      </main>
 
-    <footer>
-      <span>Codex Orchestrator</span>
-      <span>单项目 · 串行任务 · 本机登录</span>
-    </footer>
+      <aside v-if="notificationsOpen" class="notification-drawer">
+        <header><div><span class="section-kicker">运行提醒</span><h2>通知中心</h2></div><button type="button" aria-label="关闭通知" @click="notificationsOpen = false">×</button></header>
+        <div v-if="store.notificationSettings.value.in_app && store.notifications.value.length" class="notification-list">
+          <button v-for="notification in store.notifications.value" :key="notification.notification_id" type="button" :class="{ unread: !notification.read_at }" @click="openNotification(notification)">
+            <span class="notification-dot" /><span><strong>{{ notification.title }}</strong><small>{{ notification.message }}</small><time>{{ formatTime(notification.created_at) }}</time></span>
+          </button>
+        </div>
+        <div v-else class="empty-inline">{{ store.notificationSettings.value.in_app ? "暂时没有运行提醒。" : "站内通知已关闭，可在设置中重新开启。" }}</div>
+        <RouterLink class="drawer-settings-link" to="/settings" @click="notificationsOpen = false">通知设置 →</RouterLink>
+      </aside>
+      <div v-if="notificationsOpen" class="drawer-scrim" @click="notificationsOpen = false" />
+    </div>
   </div>
 </template>

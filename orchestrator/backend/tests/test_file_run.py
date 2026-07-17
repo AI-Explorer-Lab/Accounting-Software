@@ -4,7 +4,14 @@ import json
 import pytest
 
 from orchestrator.backend.mapper.file_run import FileRunMapper
-from orchestrator.codex_loop.models import CommandResult, TaskSpec, ValidationRound
+from orchestrator.codex_loop.models import (
+    CommandResult,
+    ReviewRecord,
+    ReviewStatus,
+    RunStatus,
+    TaskSpec,
+    ValidationRound,
+)
 from orchestrator.codex_loop.report import ReportBuilder
 from orchestrator.codex_loop.state import StateStore
 
@@ -55,6 +62,40 @@ def test_mapper_returns_none_for_unknown_safe_task(tmp_path: Path) -> None:
     assert mapper.load_task("unknown-task") is None
     assert mapper.load_snapshot("unknown-task") is None
     assert mapper.load_report("unknown-task") is None
+
+
+def test_mapper_keeps_prior_queue_review_but_exposes_current_pending_status(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path)
+    task = TaskSpec(
+        task_id="queue-1-task-01",
+        queue_id="queue-1",
+        sequence=1,
+        requirement="Revise the queued change",
+        acceptance_criteria=["The revision can be reviewed again"],
+    )
+    state = store.initialize_run(task)
+    state.mark_success()
+    store.save_state(state)
+    store.save_review_history(
+        ReviewRecord(
+            task_id=task.task_id,
+            decision=ReviewStatus.CHANGES_REQUESTED,
+            reviewer="Reviewer",
+            comment="Please revise it.",
+            machine_status=RunStatus.SUCCESS,
+            reviewed_diff_sha256="a" * 64,
+        )
+    )
+
+    snapshot = FileRunMapper(tmp_path).load_snapshot(task.task_id)
+
+    assert snapshot is not None
+    assert snapshot.review_status == "pending"
+    assert snapshot.review is not None
+    assert snapshot.review["decision"] == "changes_requested"
+    assert snapshot.review_history[0]["decision"] == "changes_requested"
 
 
 def test_mapper_rejects_unsafe_task_id(tmp_path: Path) -> None:
