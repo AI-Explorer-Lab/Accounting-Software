@@ -2,6 +2,7 @@
 
 ## 任务
 - 编号：{{task_id}}
+- 队列归属：{{queue_context}}
 - 需求：{{requirement}}
 - 验收标准：
 {{acceptance_criteria}}

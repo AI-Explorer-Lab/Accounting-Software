@@ -3,15 +3,19 @@ from __future__ import annotations
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from threading import RLock
-from typing import Callable
+from typing import Callable, TypeVar
 
 from orchestrator.codex_loop.models import RunResult, TaskSpec
 
 
+Prepared = TypeVar("Prepared")
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionRecord:
-    task: TaskSpec
-    future: Future[RunResult]
+    identifier: str
+    task: TaskSpec | None
+    future: Future[object]
 
 
 class TaskExecutor:
@@ -31,15 +35,51 @@ class TaskExecutor:
         task: TaskSpec,
         operation: Callable[[], RunResult],
     ) -> ExecutionRecord:
+        return self.submit_operation(task.task_id, operation, task=task)
+
+    def submit_operation(
+        self,
+        identifier: str,
+        operation: Callable[[], object],
+        *,
+        task: TaskSpec | None = None,
+    ) -> ExecutionRecord:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Task executor is closed")
             if self.active_task_id() is not None:
                 raise RuntimeError("Another task is already running")
             future = self._pool.submit(operation)
-            record = ExecutionRecord(task=task, future=future)
-            self._records[task.task_id] = record
+            record = ExecutionRecord(
+                identifier=identifier,
+                task=task,
+                future=future,
+            )
+            self._records[identifier] = record
             return record
+
+    def prepare_and_submit(
+        self,
+        identifier: str,
+        prepare: Callable[[], Prepared],
+        operation: Callable[[Prepared], object],
+    ) -> tuple[Prepared, ExecutionRecord]:
+        """Persist work and reserve the one worker as one critical section."""
+
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Task executor is closed")
+            if self.active_task_id() is not None:
+                raise RuntimeError("Another task is already running")
+            prepared = prepare()
+            future = self._pool.submit(operation, prepared)
+            record = ExecutionRecord(
+                identifier=identifier,
+                task=None,
+                future=future,
+            )
+            self._records[identifier] = record
+            return prepared, record
 
     def active_task_id(self) -> str | None:
         with self._lock:

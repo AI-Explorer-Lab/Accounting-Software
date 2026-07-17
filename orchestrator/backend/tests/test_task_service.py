@@ -12,9 +12,9 @@ from orchestrator.backend.exceptions.business_exception import (
     TaskNotReadyError,
 )
 from orchestrator.backend.service.task_service import TaskService
-from orchestrator.codex_loop.models import RunResult, TaskSpec
+from orchestrator.codex_loop.models import RunResult, TaskQueueSpec, TaskSpec
 from orchestrator.codex_loop.report import ReportBuilder
-from orchestrator.codex_loop.state import StateStore
+from orchestrator.codex_loop.state import QueueStore, StateStore
 
 
 class CompletingWorkflow:
@@ -181,3 +181,32 @@ def test_invalid_missing_and_not_ready_tasks_have_distinct_errors(
             service.get_report(task.task_id)
     finally:
         service.close(wait=True)
+
+
+def test_task_detail_finds_a_subtask_in_its_queue_directory(tmp_path: Path) -> None:
+    queue_store = QueueStore(tmp_path)
+    spec = TaskQueueSpec.from_inputs(
+        "Queue",
+        [
+            {"requirement": "First", "acceptance_criteria": ["Works"]},
+            {"requirement": "Second", "acceptance_criteria": ["Works"]},
+        ],
+        queue_id="queue-detail",
+    )
+    spec.base_commit = "a" * 40
+    queue_store.initialize_queue(spec)
+    child_store = queue_store.subtask_store(spec.queue_id)
+    child = spec.subtasks[0]
+    state = child_store.initialize_run(child)
+    state.mark_success()
+    child_store.save_state(state)
+
+    service = TaskService(tmp_path)
+    try:
+        snapshot = service.get_task(child.task_id)
+    finally:
+        service.close(wait=True)
+
+    assert snapshot.queue_id == spec.queue_id
+    assert snapshot.sequence == 1
+    assert snapshot.task_id == child.task_id

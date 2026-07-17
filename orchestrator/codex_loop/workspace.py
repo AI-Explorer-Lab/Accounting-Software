@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from importlib import metadata
 import os
 from pathlib import Path
@@ -156,6 +157,48 @@ class WorkspaceManager:
             )
             if status.strip():
                 raise InfrastructureError("New task worktree is not clean")
+
+    def apply_inherited_diff(
+        self,
+        info: WorkspaceInfo,
+        diff_path: str | Path,
+        expected_sha256: str,
+    ) -> None:
+        """Apply an approved cumulative diff as the read-only index baseline."""
+
+        path = Path(diff_path).expanduser().resolve()
+        if not path.is_file():
+            raise InfrastructureError("Approved cumulative diff does not exist")
+        content = path.read_bytes()
+        actual_sha256 = hashlib.sha256(content).hexdigest()
+        if actual_sha256 != str(expected_sha256):
+            raise InfrastructureError("Approved cumulative diff SHA-256 changed")
+        if not content:
+            return
+        self._run_git(
+            info.worktree,
+            "apply",
+            "--check",
+            "--index",
+            "--binary",
+            str(path),
+        )
+        self._run_git(
+            info.worktree,
+            "apply",
+            "--index",
+            "--binary",
+            str(path),
+        )
+        staged = self._run_git(
+            info.worktree,
+            "diff",
+            "--cached",
+            "--quiet",
+            allowed_exit_codes={0, 1},
+        )
+        if staged.returncode == 0:
+            raise InfrastructureError("Approved cumulative diff produced no baseline")
 
     def _verify_control_repository(self) -> None:
         actual = Path(

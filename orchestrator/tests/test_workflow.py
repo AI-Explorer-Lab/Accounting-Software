@@ -409,6 +409,32 @@ def test_resume_uses_saved_thread_and_pending_repair(repo: Path) -> None:
     assert "# 上一轮验证失败" in client.prompts[0]
 
 
+def test_resume_rehydrates_legacy_redacted_paths_from_manifest(repo: Path) -> None:
+    saved_task = task()
+    store, state = initialize_isolated_run(repo, saved_task)
+    state.thread_id = "saved-thread"
+    state.turn_count = 1
+    state.phase = RunPhase.VALIDATION_PENDING
+    state.pending_prompt_kind = None
+    store.save_state(state)
+
+    state_path = store.run_dir(saved_task.task_id) / "state.json"
+    persisted = json.loads(state_path.read_text(encoding="utf-8"))
+    persisted["repo_root"] = "[REDACTED]/.codex-orchestrator/worktrees/workflow-test"
+    persisted["control_repo_root"] = "[REDACTED]"
+    state_path.write_text(
+        json.dumps(persisted, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    client = FakeCodexClient()
+    validator = FakeValidator([(True, [0, 0, 0])])
+    result = workflow_with(repo, client, validator).resume(saved_task.task_id)
+
+    assert result.status is RunStatus.SUCCESS
+    assert validator.round_numbers == [1]
+
+
 def test_resume_from_in_progress_turn_does_not_duplicate_prompt(repo: Path) -> None:
     saved_task = task()
     store, state = initialize_isolated_run(repo, saved_task)

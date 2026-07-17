@@ -18,9 +18,12 @@ from uuid import uuid4
 
 from .models import (
     CommandResult,
+    QueueState,
+    QueueStatus,
     ReviewRecord,
     RunResult,
     RunState,
+    TaskQueueSpec,
     TaskSpec,
     ValidationRound,
     utc_now_iso,
@@ -68,6 +71,7 @@ def _sensitive_environment_values(
     values = {
         str(value)
         for name, value in source.items()
+        if str(name).upper() not in {"PWD", "OLDPWD"}
         if _SENSITIVE_NAME.search(str(name))
         and str(value)
         and len(str(value)) >= 3
@@ -170,6 +174,29 @@ def _atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
+def _atomic_write_bytes(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, path)
+        _fsync_directory(path.parent)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
 def _atomic_write_json(path: Path, data: Mapping[str, Any]) -> None:
     safe_data = redact_sensitive_data(dict(data))
     content = json.dumps(safe_data, ensure_ascii=False, indent=2, sort_keys=True)
@@ -195,10 +222,21 @@ class ActiveLock:
 class StateStore:
     """Manage all durable artifacts below ``repo/.codex-orchestrator``."""
 
-    def __init__(self, repo_root: str | Path) -> None:
+    def __init__(
+        self,
+        repo_root: str | Path,
+        *,
+        runs_root: str | Path | None = None,
+        queue_id: str | None = None,
+    ) -> None:
         self.repo_root = Path(repo_root).expanduser().resolve()
         self.root = self.repo_root / ".codex-orchestrator"
-        self.runs_root = self.root / "runs"
+        self.runs_root = (
+            Path(runs_root).expanduser().resolve()
+            if runs_root is not None
+            else self.root / "runs"
+        )
+        self.queue_id = queue_id
         self.active_lock_path = self.root / "active.lock"
 
     def run_dir(self, task_id: str) -> Path:
@@ -228,6 +266,13 @@ class StateStore:
         state = RunState(
             task_id=task.task_id,
             repo_root=str(Path(task_repo_root or self.repo_root).resolve()),
+            schema_version=task.schema_version,
+            queue_id=task.queue_id,
+            sequence=task.sequence,
+            inherited_baseline=bool(workspace_values.get("inherited_baseline", False)),
+            inherited_diff_sha256=str(
+                workspace_values.get("inherited_diff_sha256", "")
+            ),
             control_repo_root=str(self.repo_root),
             base_ref=str(workspace_values.get("base_ref", "HEAD")),
             base_commit=str(workspace_values.get("base_commit", "")),
@@ -305,6 +350,42 @@ class StateStore:
         return ReviewRecord.from_dict(
             _read_json(self.run_dir(task_id) / "review.json")
         )
+
+    def save_review_history(self, review: ReviewRecord) -> Path:
+        reviews_dir = self.run_dir(review.task_id) / "reviews"
+        reviews_dir.mkdir(parents=True, exist_ok=True)
+        existing = sorted(reviews_dir.glob("review-*.json"))
+        review.review_number = len(existing) + 1
+        path = reviews_dir / f"review-{review.review_number:02d}.json"
+        if path.exists():
+            raise ValueError("review history entry already exists")
+        _atomic_write_json(path, review.to_dict())
+        return path
+
+    def load_review_history(self, task_id: str) -> list[ReviewRecord]:
+        reviews_dir = self.run_dir(task_id) / "reviews"
+        if not reviews_dir.is_dir():
+            return []
+        return [
+            ReviewRecord.from_dict(_read_json(path))
+            for path in sorted(reviews_dir.glob("review-*.json"))
+        ]
+
+    def load_latest_review(self, task_id: str) -> ReviewRecord | None:
+        reviews = self.load_review_history(task_id)
+        return reviews[-1] if reviews else None
+
+    def archive_review_revision(self, task_id: str, revision: int) -> None:
+        run_dir = self.run_dir(task_id)
+        revisions_dir = run_dir / "changes/revisions"
+        for source_name, target_name in (
+            ("changes/final.diff", f"revision-{revision:02d}.diff"),
+            ("changes/files.json", f"revision-{revision:02d}.json"),
+            ("changes/cumulative.diff", f"revision-{revision:02d}-cumulative.diff"),
+        ):
+            source = run_dir / source_name
+            if source.is_file():
+                _atomic_write_bytes(revisions_dir / target_name, source.read_bytes())
 
     def unfinished_task_ids(self, *, excluding: str | None = None) -> list[str]:
         """Return durable non-final tasks, independent of process-lock liveness."""
@@ -462,9 +543,133 @@ class StateStore:
         _fsync_directory(self.root)
 
 
+class QueueStore:
+    """Persist queue definitions and nested subtask runs without a database."""
+
+    def __init__(self, repo_root: str | Path) -> None:
+        self.repo_root = Path(repo_root).expanduser().resolve()
+        self.root = self.repo_root / ".codex-orchestrator"
+        self.queues_root = self.root / "queues"
+
+    def queue_dir(self, queue_id: str) -> Path:
+        TaskSpec._TASK_ID_PATTERN.fullmatch(queue_id) or StateStore._raise_bad_task_id(
+            queue_id
+        )
+        if "/" in queue_id or "\\" in queue_id or ".." in queue_id:
+            StateStore._raise_bad_task_id(queue_id)
+        return self.queues_root / queue_id
+
+    def subtask_store(self, queue_id: str) -> StateStore:
+        return StateStore(
+            self.repo_root,
+            runs_root=self.queue_dir(queue_id) / "subtasks",
+            queue_id=queue_id,
+        )
+
+    def initialize_queue(self, spec: TaskQueueSpec) -> QueueState:
+        queue_dir = self.queue_dir(spec.queue_id)
+        if queue_dir.exists() and any(queue_dir.iterdir()):
+            raise ValueError(f"queue directory already exists: {spec.queue_id}")
+        if not spec.base_commit:
+            raise ValueError("queue base_commit must be resolved before persistence")
+        state = QueueState.from_spec(spec)
+        self.save_spec(spec)
+        self.save_state(state)
+        self.append_event(spec.queue_id, "queue.created", {"name": spec.name})
+        return state
+
+    def save_spec(self, spec: TaskQueueSpec) -> Path:
+        path = self.queue_dir(spec.queue_id) / "queue.json"
+        if path.is_file():
+            existing = TaskQueueSpec.from_dict(_read_json(path))
+            if existing.to_dict() != spec.to_dict():
+                raise ValueError("queue.json is immutable once created")
+            return path
+        _atomic_write_json(path, spec.to_dict())
+        return path
+
+    def load_spec(self, queue_id: str) -> TaskQueueSpec:
+        return TaskQueueSpec.from_dict(_read_json(self.queue_dir(queue_id) / "queue.json"))
+
+    def save_state(self, state: QueueState) -> Path:
+        state.touch()
+        path = self.queue_dir(state.queue_id) / "state.json"
+        _atomic_write_json(path, state.to_dict())
+        return path
+
+    def load_state(self, queue_id: str) -> QueueState:
+        return QueueState.from_dict(_read_json(self.queue_dir(queue_id) / "state.json"))
+
+    def unfinished_queue_ids(self, *, excluding: str | None = None) -> list[str]:
+        if not self.queues_root.is_dir():
+            return []
+        queue_ids: list[str] = []
+        for state_path in sorted(self.queues_root.glob("*/state.json")):
+            queue_id = state_path.parent.name
+            if queue_id == excluding:
+                continue
+            state = QueueState.from_dict(_read_json(state_path))
+            if not state.status.is_final:
+                queue_ids.append(queue_id)
+        return queue_ids
+
+    def find_queue_for_task(self, task_id: str) -> str | None:
+        if not TaskSpec._TASK_ID_PATTERN.fullmatch(task_id):
+            raise ValueError(f"unsafe task id: {task_id!r}")
+        if not self.queues_root.is_dir():
+            return None
+        for task_path in self.queues_root.glob(f"*/subtasks/{task_id}/task.json"):
+            return task_path.parents[2].name
+        return None
+
+    def append_event(
+        self,
+        queue_id: str,
+        event_type: str,
+        payload: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        path = self.queue_dir(queue_id) / "events.jsonl"
+        sequence = 1
+        if path.is_file():
+            sequence = len([line for line in path.read_text().splitlines() if line]) + 1
+        event = redact_sensitive_data(
+            {
+                "schema_version": 2,
+                "seq": sequence,
+                "timestamp": utc_now_iso(),
+                "type": event_type,
+                "payload": dict(payload or {}),
+            }
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n"
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(descriptor, line.encode("utf-8"))
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        return event
+
+    def cumulative_diff_path(self, queue_id: str) -> Path:
+        return self.queue_dir(queue_id) / "changes/cumulative.diff"
+
+    def save_cumulative_diff(self, queue_id: str, source: str | Path) -> str:
+        content = Path(source).read_bytes()
+        digest = hashlib.sha256(content).hexdigest()
+        _atomic_write_bytes(self.cumulative_diff_path(queue_id), content)
+        return digest
+
+    def save_report(self, queue_id: str, report: str) -> Path:
+        path = self.queue_dir(queue_id) / "report.md"
+        _atomic_write_text(path, redact_sensitive_text(report))
+        return path
+
+
 __all__ = [
     "ActiveLock",
     "ActiveRunError",
+    "QueueStore",
     "StateStore",
     "redact_sensitive_data",
     "redact_sensitive_text",

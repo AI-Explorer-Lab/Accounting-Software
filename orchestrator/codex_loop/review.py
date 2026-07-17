@@ -1,4 +1,4 @@
-"""Immutable human review decisions bound to one exact task diff."""
+"""Human review decisions bound to exact single-task or queue-child diffs."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ class ReviewError(ValueError):
 
 
 class ReviewService:
-    """Validate and persist a run's single, final local review decision."""
+    """Persist one immutable single review or append a queue review revision."""
 
     def __init__(
         self,
@@ -42,7 +42,7 @@ class ReviewService:
         comment: str,
         reviewed_diff_sha256: str,
     ) -> ReviewRecord:
-        """Record exactly one decision after rechecking the live worktree diff."""
+        """Record a decision after rechecking the live worktree diff."""
 
         try:
             normalized_decision = (
@@ -63,11 +63,12 @@ class ReviewService:
         try:
             run_dir = self.store.run_dir(task_id)
             review_path = run_dir / "review.json"
-            if review_path.exists():
-                raise ReviewError("this task already has an immutable review")
-
             task = self.store.load_task(task_id)
             state = self.store.load_state(task_id)
+            queue_task = task.queue_id is not None
+            if review_path.exists() and not queue_task:
+                raise ReviewError("this task already has an immutable review")
+
             if state.schema_version == 0:
                 raise ReviewError("legacy_v0 runs are read-only")
             if not state.status.is_final:
@@ -78,12 +79,26 @@ class ReviewService:
                 raise ReviewError(
                     "the final diff contains redacted sensitive information and cannot be reviewed"
                 )
+            if (
+                queue_task
+                and normalized_decision is ReviewStatus.APPROVED
+                and state.status.value != "success"
+            ):
+                raise ReviewError(
+                    "a queued subtask can only be approved after validation succeeds"
+                )
 
             changes = self._load_changes(run_dir)
             final_diff = changes.get("final_diff", {})
             stored_raw_sha = str(final_diff.get("raw_sha256", ""))
             supplied_sha = str(reviewed_diff_sha256).strip()
-            audit = AuditRecorder(run_dir, state.repo_root, state.base_commit)
+            audit = AuditRecorder(
+                run_dir,
+                state.repo_root,
+                state.base_commit,
+                inherited_baseline=state.inherited_baseline,
+                queue_task=queue_task,
+            )
             current_sha = audit.current_diff_sha256()
             expected = state.last_diff_sha256 or stored_raw_sha
             if not expected or stored_raw_sha != expected:
@@ -101,7 +116,12 @@ class ReviewService:
                 machine_status=state.status,
                 reviewed_diff_sha256=supplied_sha,
             )
-            self.store.save_review(review)
+            if queue_task:
+                review.review_number = len(self.store.load_review_history(task_id)) + 1
+                self.store.archive_review_revision(task_id, review.review_number)
+                self.store.save_review_history(review)
+            else:
+                self.store.save_review(review)
             audit.append(
                 "review.recorded",
                 {

@@ -28,10 +28,15 @@ class AuditRecorder:
         run_dir: str | Path,
         worktree: str | Path,
         base_commit: str,
+        *,
+        inherited_baseline: bool = False,
+        queue_task: bool = False,
     ) -> None:
         self.run_dir = Path(run_dir).resolve()
         self.worktree = Path(worktree).resolve()
         self.base_commit = str(base_commit)
+        self.inherited_baseline = bool(inherited_baseline)
+        self.queue_task = bool(queue_task)
         self.events_path = self.run_dir / "events.jsonl"
         self._next_seq = self._load_next_seq()
 
@@ -233,6 +238,9 @@ class AuditRecorder:
         raw = self._complete_diff()
         return _sha256_bytes(raw)
 
+    def current_cumulative_diff_sha256(self) -> str:
+        return _sha256_bytes(self._cumulative_diff())
+
     def changed_paths(self) -> list[str]:
         paths = set(self._name_status())
         paths.update(self._untracked_paths())
@@ -251,8 +259,66 @@ class AuditRecorder:
             round_number=round_number,
         ) is not None
 
+    def turn_prompt_kind(self, turn_number: int) -> str | None:
+        """Return the prompt kind recorded for a started Codex turn."""
+
+        event = self._last_event("turn.started", turn_number=turn_number)
+        if event is None:
+            return None
+        payload = event.get("payload", {})
+        value = payload.get("prompt_kind") if isinstance(payload, Mapping) else None
+        return str(value) if value else None
+
     def capture_final_changes(self) -> dict[str, Any]:
         raw_diff = self._complete_diff()
+        diff_path = self.run_dir / "changes/final.diff"
+        final_diff = self._store_diff(raw_diff, diff_path)
+
+        files = self._changed_files()
+        data = {
+            "schema_version": SCHEMA_VERSION,
+            "base_commit": self.base_commit,
+            "files": files,
+            "final_diff": {
+                "path": "changes/final.diff",
+                **final_diff,
+            },
+        }
+        if self.queue_task:
+            cumulative_path = self.run_dir / "changes/cumulative.diff"
+            cumulative = self._store_diff(self._cumulative_diff(), cumulative_path)
+            data["cumulative_diff"] = {
+                "path": "changes/cumulative.diff",
+                **cumulative,
+            }
+        cumulative_redaction_count = int(
+            data.get("cumulative_diff", {}).get("redaction_count", 0)
+            if isinstance(data.get("cumulative_diff"), Mapping)
+            else 0
+        )
+        _atomic_write_json(self.run_dir / "changes/files.json", data)
+        self.append(
+            "diff.captured",
+            {
+                "path": "changes/final.diff",
+                "raw_sha256": final_diff["raw_sha256"],
+                "stored_sha256": final_diff["stored_sha256"],
+                "redaction_count": final_diff["redaction_count"],
+                "file_count": len(files),
+                "cumulative_sha256": (
+                    data.get("cumulative_diff", {}).get("raw_sha256")
+                    if isinstance(data.get("cumulative_diff"), Mapping)
+                    else None
+                ),
+            },
+            redacted=bool(
+                int(final_diff["redaction_count"]) + cumulative_redaction_count
+            ),
+        )
+        return data
+
+    @staticmethod
+    def _store_diff(raw_diff: bytes, path: Path) -> dict[str, Any]:
         raw_sha = _sha256_bytes(raw_diff)
         raw_text = raw_diff.decode("utf-8", errors="replace")
         stored_text = redact_sensitive_text(raw_text)
@@ -262,35 +328,12 @@ class AuditRecorder:
         )
         if stored_text != raw_text and replacement_count == 0:
             replacement_count = 1
-        diff_path = self.run_dir / "changes/final.diff"
-        _atomic_write_text(diff_path, stored_text)
-        stored_sha = _sha256_bytes(diff_path.read_bytes())
-
-        files = self._changed_files()
-        data = {
-            "schema_version": SCHEMA_VERSION,
-            "base_commit": self.base_commit,
-            "files": files,
-            "final_diff": {
-                "path": "changes/final.diff",
-                "raw_sha256": raw_sha,
-                "stored_sha256": stored_sha,
-                "redaction_count": replacement_count,
-            },
+        _atomic_write_text(path, stored_text)
+        return {
+            "raw_sha256": raw_sha,
+            "stored_sha256": _sha256_bytes(path.read_bytes()),
+            "redaction_count": replacement_count,
         }
-        _atomic_write_json(self.run_dir / "changes/files.json", data)
-        self.append(
-            "diff.captured",
-            {
-                "path": "changes/final.diff",
-                "raw_sha256": raw_sha,
-                "stored_sha256": stored_sha,
-                "redaction_count": replacement_count,
-                "file_count": len(files),
-            },
-            redacted=replacement_count > 0,
-        )
-        return data
 
     def denied_event_count(self) -> int:
         if not self.events_path.is_file():
@@ -514,6 +557,26 @@ class AuditRecorder:
             )
 
     def _complete_diff(self) -> bytes:
+        arguments = ["diff", "--binary", "--find-renames"]
+        if not self.inherited_baseline:
+            arguments.append(self.base_commit)
+        arguments.append("--")
+        tracked = self._git_bytes(*arguments)
+        chunks = [tracked]
+        for path in self._untracked_paths():
+            completed = self._run_git(
+                "diff",
+                "--no-index",
+                "--binary",
+                "--",
+                "/dev/null",
+                path,
+                allowed_exit_codes={0, 1},
+            )
+            chunks.append(completed.stdout)
+        return b"".join(chunks)
+
+    def _cumulative_diff(self) -> bytes:
         tracked = self._git_bytes(
             "diff", "--binary", "--find-renames", self.base_commit, "--"
         )
@@ -555,9 +618,11 @@ class AuditRecorder:
         return files
 
     def _name_status(self) -> dict[str, str]:
-        raw = self._git_bytes(
-            "diff", "--name-status", "-z", "--find-renames", self.base_commit, "--"
-        )
+        arguments = ["diff", "--name-status", "-z", "--find-renames"]
+        if not self.inherited_baseline:
+            arguments.append(self.base_commit)
+        arguments.append("--")
+        raw = self._git_bytes(*arguments)
         parts = raw.decode("utf-8", errors="surrogateescape").split("\0")
         statuses: dict[str, str] = {}
         index = 0
@@ -581,9 +646,11 @@ class AuditRecorder:
         return statuses
 
     def _numstat(self) -> dict[str, tuple[int, int]]:
-        text = self._git_text(
-            "diff", "--numstat", "--find-renames", self.base_commit, "--"
-        )
+        arguments = ["diff", "--numstat", "--find-renames"]
+        if not self.inherited_baseline:
+            arguments.append(self.base_commit)
+        arguments.append("--")
+        text = self._git_text(*arguments)
         values: dict[str, tuple[int, int]] = {}
         for line in text.splitlines():
             parts = line.split("\t")
@@ -603,6 +670,11 @@ class AuditRecorder:
         )
 
     def _git_file_at_base(self, path: str) -> bytes | None:
+        if self.inherited_baseline:
+            completed = self._run_git(
+                "show", f":{path}", allowed_exit_codes={0, 128}
+            )
+            return completed.stdout if completed.returncode == 0 else None
         completed = self._run_git(
             "show", f"{self.base_commit}:{path}", allowed_exit_codes={0, 128}
         )

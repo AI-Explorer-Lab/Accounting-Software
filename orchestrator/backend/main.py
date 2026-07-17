@@ -15,9 +15,11 @@ from .config.config import (
 )
 from .constant.values import API_PREFIX, APP_NAME, APP_VERSION
 from .controller.health_api import router as health_router
+from .controller.queue_api import router as queue_router
 from .controller.task_api import router as task_router
 from .exceptions.exception_handler import register_exception_handlers
 from .middlewares.request_logging import RequestLoggingMiddleware
+from .service.queue_service import QueueService
 from .service.task_service import TaskService
 
 
@@ -28,6 +30,7 @@ def create_app(
     *,
     config: Any = settings,
     task_service: TaskService | None = None,
+    queue_service: QueueService | None = None,
     validate_config: bool = True,
 ) -> FastAPI:
     owns_service = task_service is None
@@ -45,8 +48,18 @@ def create_app(
                 agent.get("validation_timeout_seconds", 900)
             ),
         )
+        queues = queue_service
+        if queues is None and isinstance(service, TaskService):
+            queues = QueueService(
+                repo_root_from_settings(config),
+                validation_timeout_seconds=float(
+                    agent.get("validation_timeout_seconds", 900)
+                ),
+                executor=service.executor,
+            )
         app.state.environment = str(environment.get("name", "development"))
         app.state.task_service = service
+        app.state.queue_service = queues
         try:
             yield
         finally:
@@ -72,6 +85,7 @@ def create_app(
     register_exception_handlers(app)
     app.include_router(health_router, prefix=API_PREFIX)
     app.include_router(task_router, prefix=API_PREFIX)
+    app.include_router(queue_router, prefix=API_PREFIX)
     return app
 
 

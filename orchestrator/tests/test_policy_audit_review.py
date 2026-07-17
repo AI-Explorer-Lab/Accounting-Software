@@ -309,6 +309,33 @@ def test_policy_runtime_copies_only_login_material_into_task_home(
         assert "(allow signal (target same-sandbox))" in profile
 
 
+def test_policy_allows_only_package_manifests_needed_by_shared_node_dependencies(
+    repository: Path,
+) -> None:
+    info = workspace(repository, "package-scope-policy-test")
+    scope_manifest = repository / "package.json"
+    scope_manifest.write_text('{"private":true}\n', encoding="utf-8")
+    policy = ExecutionPolicy(repository, info)
+
+    policy.prepare_runtime()
+    expected = f'(allow file-read* (literal "{scope_manifest}"))'
+    app_server_profile = policy.app_server_profile_path.read_text(encoding="utf-8")
+
+    assert expected in app_server_profile
+    assert f'(allow file-read* (subpath "{repository.parent}"))' not in app_server_profile
+
+    if Path("/usr/bin/sandbox-exec").is_file():
+        policy.validation_command_prefix()
+        validation_profile = (policy.runtime_root / "validation.sb").read_text(
+            encoding="utf-8"
+        )
+        assert expected in validation_profile
+        assert (
+            f'(allow file-read* (subpath "{repository.parent}"))'
+            not in validation_profile
+        )
+
+
 def test_audit_captures_complete_diff_hashes_events_and_secret_redaction(
     repository: Path,
 ) -> None:

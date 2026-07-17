@@ -28,6 +28,23 @@ class TaskCreateRequest(BaseModel):
         return normalized
 
 
+class QueueSubtaskCreateRequest(TaskCreateRequest):
+    pass
+
+
+class QueueCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=500)
+    subtasks: list[QueueSubtaskCreateRequest] = Field(min_length=2, max_length=50)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("name cannot be blank")
+        return name
+
+
 class ReviewRequest(BaseModel):
     decision: Literal["approved", "changes_requested", "rejected"]
     reviewer: str = Field(min_length=1, max_length=200)

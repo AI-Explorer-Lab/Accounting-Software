@@ -67,7 +67,7 @@ function formatTime(value: string | null): string {
       </div>
       <div>
         <dt>验证失败</dt>
-        <dd>{{ task.failure_count }} / 3</dd>
+        <dd>{{ task.cycle_failure_count }} / 3（累计 {{ task.failure_count }}）</dd>
       </div>
       <div>
         <dt>Thread</dt>

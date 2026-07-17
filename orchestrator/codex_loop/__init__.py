@@ -1,6 +1,7 @@
-"""Single-task Codex implementation, validation, and review loop."""
+"""Single-task and strictly serial multi-task Codex workflows."""
 
+from .queue_workflow import QueueWorkflow
 from .review import ReviewService
 from .workflow import OrchestrationWorkflow
 
-__all__ = ["OrchestrationWorkflow", "ReviewService"]
+__all__ = ["OrchestrationWorkflow", "QueueWorkflow", "ReviewService"]

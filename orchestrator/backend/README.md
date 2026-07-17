@@ -1,6 +1,6 @@
 # Codex Orchestrator API
 
-这个 FastAPI 服务把网页请求交给现有 `orchestrator.codex_loop`。它不创建第二套任务数据；任务、隔离信息、权限、事件、diff、审查和报告都来自仓库根目录的 `.codex-orchestrator/`。CLI 与 API 复用同一个人工审查服务。
+这个 FastAPI 服务把网页请求交给现有 `orchestrator.codex_loop`。它不创建第二套任务数据；单任务来自 `.codex-orchestrator/runs/`，长任务及其子任务来自 `.codex-orchestrator/queues/`。CLI 与 API 复用相同的调度和人工审查规则。
 
 ## 安装
 
@@ -39,6 +39,11 @@ conda run -n account uvicorn orchestrator.backend.main:app \
 | `GET` | `/api/tasks/{task_id}/report` | 读取完成后的 `report.md` |
 | `GET` | `/api/tasks/{task_id}/diff` | 只读获取脱敏后的最终 diff |
 | `POST` | `/api/tasks/{task_id}/review` | 提交一次人工结论并绑定 diff SHA-256 |
+| `POST` | `/api/queues` | 提交至少两个有固定顺序的子任务 |
+| `GET` | `/api/queues/{queue_id}` | 查询整体进度和当前子任务 |
+| `POST` | `/api/queues/{queue_id}/resume` | 环境故障修复后恢复当前子任务 |
+| `GET` | `/api/queues/{queue_id}/report` | 读取长任务汇总报告 |
+| `GET` | `/api/queues/{queue_id}/diff` | 读取已批准的最终累计 Diff |
 
 创建任务示例：
 
@@ -50,7 +55,9 @@ curl -X POST http://127.0.0.1:8100/api/tasks \
 
 API 在单工作线程中执行 Codex，因此 HTTP 请求不会等待开发和测试结束。同一时间只能有一个活动任务；已有未完成任务时，先使用恢复接口，不要创建新任务。
 
-审查请求包含 `decision`、`reviewer`、`comment` 和 `reviewed_diff_sha256`。只允许 `approved`、`changes_requested`、`rejected`；任务未结束、diff 已变化、diff 含疑似密钥、旧任务或已有结论时返回冲突。`reviewer` 是本地声明身份，不是登录认证身份。
+创建长任务时，`subtasks` 数组顺序就是唯一执行顺序，不接收依赖字段。每项分别包含 `requirement` 和至少一条 `acceptance_criteria`。当前子任务机器流程结束后，仍使用 `/api/tasks/{task_id}`、`report`、`diff` 和 `review` 查看及审查；批准后后台单工作线程才会执行下一项。
+
+审查请求包含 `decision`、`reviewer`、`comment` 和 `reviewed_diff_sha256`。只允许 `approved`、`changes_requested`、`rejected`；任务未结束、diff 已变化、diff 含疑似密钥或旧任务时返回冲突。单任务结论不可覆盖；队列子任务的多次返修审查按历史追加保存。`reviewer` 是本地声明身份，不是登录认证身份。
 
 ## 测试
 

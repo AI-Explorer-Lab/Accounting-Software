@@ -24,12 +24,19 @@ def _indented(text: str) -> str:
     return "\n".join(f"    {line}" for line in text.splitlines())
 
 
+def _queue_context(task: TaskSpec) -> str:
+    if task.queue_id is None:
+        return "单任务"
+    return f"长任务 {task.queue_id}，第 {task.sequence} 个子任务"
+
+
 class TemplateRenderer:
     """Strict renderer for the three version-controlled Markdown templates."""
 
     ALLOWED_TEMPLATES = {
         "initial_prompt.md",
         "repair_prompt.md",
+        "review_repair_prompt.md",
         "final_report.md",
     }
 
@@ -70,6 +77,7 @@ class PromptRenderer:
             "initial_prompt.md",
             {
                 "task_id": task.task_id,
+                "queue_context": _queue_context(task),
                 "requirement": task.requirement,
                 "acceptance_criteria": _bullets(task.acceptance_criteria),
                 "worktree": state.worktree_relative_path,
@@ -92,10 +100,36 @@ class PromptRenderer:
             "repair_prompt.md",
             {
                 "task_id": task.task_id,
+                "queue_context": _queue_context(task),
                 "turn_number": state.turn_count + 1,
                 "requirement": task.requirement,
                 "redacted_failure_summary": sanitize_for_codex(
                     details, self.repair_summary_limit
+                ),
+                "changed_files": ", ".join(changed_files or []) or "无",
+                "diff_sha256": diff_sha256 or "尚未生成",
+            },
+        )
+
+    def review_repair_prompt(
+        self,
+        task: TaskSpec,
+        state: RunState,
+        review_comment: str,
+        *,
+        changed_files: list[str] | None = None,
+        diff_sha256: str = "",
+    ) -> str:
+        return self.renderer.render(
+            "review_repair_prompt.md",
+            {
+                "task_id": task.task_id,
+                "queue_context": _queue_context(task),
+                "turn_number": state.turn_count + 1,
+                "requirement": task.requirement,
+                "review_comment": sanitize_for_codex(
+                    review_comment or "审查人要求继续修改。",
+                    self.repair_summary_limit,
                 ),
                 "changed_files": ", ".join(changed_files or []) or "无",
                 "diff_sha256": diff_sha256 or "尚未生成",
@@ -185,6 +219,11 @@ class ReportBuilder:
             requested = {}
         values = {
             "task_id": result.task_id,
+            "queue_context": (
+                "单任务"
+                if result.queue_id is None
+                else f"长任务 {result.queue_id}，第 {result.sequence} 个子任务"
+            ),
             "thread_id": result.thread_id or "未创建",
             "turn_count": result.turn_count,
             "requirement": result.requirement,

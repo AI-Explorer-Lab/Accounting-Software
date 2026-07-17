@@ -58,3 +58,30 @@ class ReviewConflictError(BusinessException):
             code=ErrorCode.TASK_CONFLICT,
             status_code=409,
         )
+
+
+class InvalidQueueIdError(BusinessException):
+    def __init__(self) -> None:
+        super().__init__(
+            "Invalid queue ID",
+            code=ErrorCode.INVALID_QUEUE_ID,
+            status_code=400,
+        )
+
+
+class QueueNotFoundError(BusinessException):
+    def __init__(self, queue_id: str) -> None:
+        super().__init__(
+            f"Queue not found: {queue_id}",
+            code=ErrorCode.QUEUE_NOT_FOUND,
+            status_code=404,
+        )
+
+
+class QueueNotReadyError(BusinessException):
+    def __init__(self, queue_id: str) -> None:
+        super().__init__(
+            f"Queue output is not ready: {queue_id}",
+            code=ErrorCode.QUEUE_NOT_READY,
+            status_code=409,
+        )

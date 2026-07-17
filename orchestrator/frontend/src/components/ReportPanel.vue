@@ -85,13 +85,20 @@ function submit(decision: ReviewDecision): void {
 
       <div class="review-section" data-test="review-section">
         <h3>人工审查结论</h3>
-        <dl v-if="task.review" class="review-result">
+        <dl v-if="task.review && task.review_status !== 'pending'" class="review-result">
           <div><dt>结论</dt><dd>{{ display(task.review.decision) }}</dd></div>
           <div><dt>审查人</dt><dd>{{ display(task.review.reviewer) }}</dd></div>
           <div><dt>说明</dt><dd>{{ display(task.review.comment) }}</dd></div>
           <div><dt>对应 Diff</dt><dd><code>{{ display(task.review.reviewed_diff_sha256) }}</code></dd></div>
         </dl>
-        <form v-else-if="task.review_status === 'pending'" class="review-form" @submit.prevent>
+        <form
+          v-else-if="
+            task.review_status === 'pending' &&
+            !(task.queue_id !== null && task.status === 'infrastructure_error')
+          "
+          class="review-form"
+          @submit.prevent
+        >
           <label>
             审查人（本地声明身份）
             <input v-model="reviewer" data-test="reviewer" :disabled="submittingReview" />
@@ -106,7 +113,11 @@ function submit(decision: ReviewDecision): void {
               type="button"
               class="primary-button"
               data-test="approve"
-              :disabled="submittingReview || task.diff_redaction_count > 0"
+              :disabled="
+                submittingReview ||
+                task.diff_redaction_count > 0 ||
+                (task.queue_id !== null && task.status !== 'success')
+              "
               @click="submit('approved')"
             >批准</button>
             <button
@@ -123,6 +134,19 @@ function submit(decision: ReviewDecision): void {
             >驳回</button>
           </div>
         </form>
+        <p
+          v-else-if="task.queue_id !== null && task.status === 'infrastructure_error'"
+          class="empty-copy"
+        >请先通过长任务恢复接口修复并恢复当前子任务，环境故障不能提交审查。</p>
+        <div v-if="task.review_history.length" class="review-history">
+          <h3>审查历史</h3>
+          <ol>
+            <li v-for="(item, index) in task.review_history" :key="index">
+              <strong>第 {{ item.review_number || index + 1 }} 次：{{ display(item.decision) }}</strong>
+              <span>{{ display(item.reviewer) }} · {{ display(item.comment) }}</span>
+            </li>
+          </ol>
+        </div>
       </div>
     </template>
 

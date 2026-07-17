@@ -21,7 +21,7 @@ from .models import (
 )
 from .policy import ExecutionPolicy
 from .report import PromptRenderer, ReportBuilder
-from .state import ActiveRunError, StateStore, redact_sensitive_text
+from .state import ActiveRunError, QueueStore, StateStore, redact_sensitive_text
 from .validation_runner import ValidationRunner
 from .workspace import WorkspaceInfo, WorkspaceManager
 
@@ -47,6 +47,8 @@ class OrchestrationWorkflow:
         report_builder: ReportBuilder | None = None,
         validation_timeout_seconds: float = 900.0,
         base_ref: str = "HEAD",
+        inherited_diff_path: str | Path | None = None,
+        inherited_diff_sha256: str = "",
     ) -> None:
         self.control_repo_root = Path(repo_root).expanduser().resolve()
         self.repo_root = self.control_repo_root  # compatibility alias
@@ -63,6 +65,12 @@ class OrchestrationWorkflow:
         self.prompt_renderer = prompt_renderer or PromptRenderer()
         self.report_builder = report_builder or ReportBuilder()
         self.validation_timeout_seconds = validation_timeout_seconds
+        self.inherited_diff_path = (
+            None
+            if inherited_diff_path is None
+            else Path(inherited_diff_path).expanduser().resolve()
+        )
+        self.inherited_diff_sha256 = str(inherited_diff_sha256)
         self.workspace_manager = WorkspaceManager(
             self.control_repo_root, base_ref=base_ref
         )
@@ -81,6 +89,12 @@ class OrchestrationWorkflow:
                 )
 
             workspace = self.workspace_manager.create(task)
+            if self.inherited_diff_path is not None:
+                self.workspace_manager.apply_inherited_diff(
+                    workspace,
+                    self.inherited_diff_path,
+                    self.inherited_diff_sha256,
+                )
             state = self.store.initialize_run(
                 task,
                 task_repo_root=workspace.worktree,
@@ -90,6 +104,8 @@ class OrchestrationWorkflow:
                     "task_branch": workspace.task_branch,
                     "worktree_relative_path": workspace.worktree_relative_path,
                     "source_worktree_was_dirty": workspace.source_worktree_was_dirty,
+                    "inherited_baseline": self.inherited_diff_path is not None,
+                    "inherited_diff_sha256": self.inherited_diff_sha256,
                 },
                 baseline_git_status=(
                     "source worktree dirty"
@@ -97,7 +113,14 @@ class OrchestrationWorkflow:
                     else "source worktree clean"
                 ),
             )
-            self.store.save_manifest(task.task_id, workspace.manifest())
+            manifest = workspace.manifest()
+            if task.queue_id is not None:
+                manifest["queue"] = {
+                    "queue_id": task.queue_id,
+                    "sequence": task.sequence,
+                    "inherited_diff_sha256": self.inherited_diff_sha256,
+                }
+            self.store.save_manifest(task.task_id, manifest)
             audit = self._audit(state)
             audit.append("run.created", {"task_id": task.task_id})
             audit.append(
@@ -112,13 +135,16 @@ class OrchestrationWorkflow:
             policy = ExecutionPolicy(self.control_repo_root, workspace)
             self.store.save_permissions(task.task_id, policy.requested_snapshot())
             policy.prepare_runtime()
-            self.workspace_manager.verify(workspace, require_clean=True)
+            self.workspace_manager.verify(
+                workspace, require_clean=self.inherited_diff_path is None
+            )
             audit.append(
                 "workspace.verified",
                 {
                     "branch": workspace.task_branch,
                     "head": workspace.base_commit,
-                    "clean": True,
+                    "clean": self.inherited_diff_path is None,
+                    "inherited_baseline": self.inherited_diff_path is not None,
                 },
             )
 
@@ -173,6 +199,13 @@ class OrchestrationWorkflow:
                 self.control_repo_root, manifest
             )
             self.workspace_manager.verify(workspace)
+            # Absolute paths in older state files may have been redacted because
+            # the standard PWD environment variable was mistaken for a password.
+            # The immutable manifest stores the safe relative worktree path, so
+            # rehydrate runtime-only paths from that verified source on resume.
+            state.repo_root = str(workspace.worktree)
+            state.control_repo_root = str(self.control_repo_root)
+            state.worktree_relative_path = workspace.worktree_relative_path
             policy = ExecutionPolicy(self.control_repo_root, workspace)
             policy.prepare_runtime()
             audit = self._audit(state)
@@ -269,7 +302,7 @@ class OrchestrationWorkflow:
         client: Any,
         audit: AuditRecorder,
     ) -> None:
-        if state.turn_count >= MAX_CODEX_TURNS:
+        if state.cycle_turn_count >= MAX_CODEX_TURNS:
             state.mark_manual_review(self._safe_git_summary(Path(state.repo_root)))
             self.store.save_state(state)
             return
@@ -278,12 +311,28 @@ class OrchestrationWorkflow:
         if prompt_kind is PromptKind.INITIAL:
             prompt = self.prompt_renderer.initial_prompt(task, state)
         elif prompt_kind is PromptKind.REPAIR:
-            if not state.rounds or state.failure_count not in {1, 2}:
+            if not state.rounds or state.cycle_failure_count not in {1, 2}:
                 raise InfrastructureError("No failed validation round is available to repair")
             prompt = self.prompt_renderer.repair_prompt(
                 task,
                 state,
                 state.rounds[-1],
+                changed_files=audit.changed_paths(),
+                diff_sha256=audit.current_diff_sha256(),
+            )
+        elif prompt_kind is PromptKind.REVIEW_REPAIR:
+            latest_review = self.store.load_latest_review(task.task_id)
+            if (
+                latest_review is None
+                or latest_review.decision.value != "changes_requested"
+            ):
+                raise InfrastructureError(
+                    "No human change request is available to repair"
+                )
+            prompt = self.prompt_renderer.review_repair_prompt(
+                task,
+                state,
+                latest_review.comment,
                 changed_files=audit.changed_paths(),
                 diff_sha256=audit.current_diff_sha256(),
             )
@@ -307,6 +356,7 @@ class OrchestrationWorkflow:
             redacted=True,
         )
         state.turn_count = turn_number
+        state.cycle_turn_count += 1
         state.phase = RunPhase.CODEX_TURN
         state.pending_prompt_kind = None
         self.store.save_state(state)
@@ -436,13 +486,13 @@ class OrchestrationWorkflow:
             raise InfrastructureError(validation_round.infrastructure_error)
         if validation_round.passed:
             state.mark_success(self._safe_git_summary(Path(state.repo_root)))
-        elif state.failure_count >= MAX_VALIDATION_FAILURES:
+        elif state.cycle_failure_count >= MAX_VALIDATION_FAILURES:
             state.mark_manual_review(self._safe_git_summary(Path(state.repo_root)))
         else:
             audit.append(
                 "retry.scheduled",
                 {
-                    "failure_count": state.failure_count,
+                    "failure_count": state.cycle_failure_count,
                     "next_turn": state.turn_count + 1,
                 },
                 round_number=round_number,
@@ -475,7 +525,7 @@ class OrchestrationWorkflow:
         if latest.passed and state.phase is RunPhase.VALIDATING:
             state.mark_success(self._safe_git_summary(Path(state.repo_root)))
             self.store.save_state(state)
-        elif not latest.passed and state.failure_count >= MAX_VALIDATION_FAILURES:
+        elif not latest.passed and state.cycle_failure_count >= MAX_VALIDATION_FAILURES:
             state.mark_manual_review(self._safe_git_summary(Path(state.repo_root)))
             self.store.save_state(state)
 
@@ -484,7 +534,7 @@ class OrchestrationWorkflow:
         if (
             state.pending_prompt_kind is not PromptKind.REPAIR
             or not state.rounds
-            or state.failure_count >= MAX_VALIDATION_FAILURES
+            or state.cycle_failure_count >= MAX_VALIDATION_FAILURES
         ):
             return
         round_number = state.rounds[-1].round_number
@@ -494,7 +544,7 @@ class OrchestrationWorkflow:
             audit.append(
                 "retry.scheduled",
                 {
-                    "failure_count": state.failure_count,
+                    "failure_count": state.cycle_failure_count,
                     "next_turn": state.turn_count + 1,
                     "recovered": True,
                 },
@@ -587,7 +637,15 @@ class OrchestrationWorkflow:
         changes = audit.capture_final_changes()
         final_diff = changes.get("final_diff", {})
         state.last_diff_sha256 = str(final_diff.get("raw_sha256", ""))
-        state.diff_redaction_count = int(final_diff.get("redaction_count", 0))
+        cumulative_diff = changes.get("cumulative_diff", {})
+        state.diff_redaction_count = max(
+            int(final_diff.get("redaction_count", 0)),
+            int(
+                cumulative_diff.get("redaction_count", 0)
+                if isinstance(cumulative_diff, Mapping)
+                else 0
+            ),
+        )
         self.store.save_state(state)
         event_type = (
             "run.failed"
@@ -610,7 +668,11 @@ class OrchestrationWorkflow:
             else {"effective": {"verified": False}}
         )
         review_path = self.store.run_dir(task.task_id) / "review.json"
-        review = self.store.load_review(task.task_id) if review_path.is_file() else None
+        review = (
+            self.store.load_latest_review(task.task_id)
+            if task.queue_id is not None
+            else (self.store.load_review(task.task_id) if review_path.is_file() else None)
+        )
         result, report = self.report_builder.build(
             task,
             state,
@@ -630,6 +692,8 @@ class OrchestrationWorkflow:
             self.store.run_dir(state.task_id),
             state.repo_root,
             state.base_commit,
+            inherited_baseline=state.inherited_baseline,
+            queue_task=state.queue_id is not None,
         )
 
     def _assert_no_other_unfinished_task(
@@ -640,6 +704,14 @@ class OrchestrationWorkflow:
             raise ActiveRunError(
                 "an unfinished task must be resumed or reviewed before starting "
                 f"another task (task_id={', '.join(unfinished)})"
+            )
+        unfinished_queues = QueueStore(
+            self.control_repo_root
+        ).unfinished_queue_ids(excluding=self.store.queue_id)
+        if unfinished_queues:
+            raise ActiveRunError(
+                "an unfinished task queue must be resumed or reviewed before "
+                f"starting another task (queue_id={', '.join(unfinished_queues)})"
             )
 
     @staticmethod

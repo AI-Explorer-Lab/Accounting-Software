@@ -13,8 +13,13 @@ from ..domain.models import TaskSnapshot
 class FileRunMapper:
     """Read the existing atomic run artifacts without creating a second store."""
 
-    def __init__(self, repo_root: str | Path) -> None:
-        self.store = StateStore(repo_root)
+    def __init__(
+        self,
+        repo_root: str | Path,
+        *,
+        store: StateStore | None = None,
+    ) -> None:
+        self.store = store or StateStore(repo_root)
 
     def validate_task_id(self, task_id: str) -> None:
         self.store.run_dir(task_id)
@@ -41,7 +46,14 @@ class FileRunMapper:
         manifest = self._optional_json(run_dir / "manifest.json")
         permissions = self._optional_json(run_dir / "permissions.json")
         changes = self._optional_json(run_dir / "changes/files.json")
-        review = self._optional_json(run_dir / "review.json")
+        review_history = [
+            review.to_dict() for review in self.store.load_review_history(task_id)
+        ]
+        review = (
+            review_history[-1]
+            if review_history
+            else self._optional_json(run_dir / "review.json")
+        )
         events = self._events(run_dir / "events.jsonl")
         repository = manifest.get("repository", {})
         workspace = (
@@ -82,6 +94,8 @@ class FileRunMapper:
             thread_id=state.thread_id,
             turn_count=state.turn_count,
             failure_count=state.failure_count,
+            cycle_turn_count=state.cycle_turn_count,
+            cycle_failure_count=state.cycle_failure_count,
             rounds=[self._round_summary(item) for item in state.rounds],
             last_error_summary=state.last_error_summary,
             infrastructure_error=state.infrastructure_error,
@@ -115,6 +129,9 @@ class FileRunMapper:
                 final_diff.get("redaction_count", state.diff_redaction_count) or 0
             ),
             review=review or None,
+            review_history=review_history,
+            queue_id=task.queue_id,
+            sequence=task.sequence,
         )
 
     def load_report(self, task_id: str) -> str | None:

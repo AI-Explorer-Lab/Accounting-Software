@@ -62,6 +62,8 @@ export interface TaskData {
   thread_id: string | null;
   turn_count: number;
   failure_count: number;
+  cycle_turn_count: number;
+  cycle_failure_count: number;
   rounds: ValidationRound[];
   last_error_summary: string;
   infrastructure_error: string | null;
@@ -78,6 +80,60 @@ export interface TaskData {
   final_diff_sha256: string;
   diff_redaction_count: number;
   review: Record<string, unknown> | null;
+  review_history: Array<Record<string, unknown>>;
+  queue_id: string | null;
+  sequence: number | null;
+}
+
+export type QueueStatus =
+  | "pending"
+  | "running"
+  | "waiting_review"
+  | "rejected"
+  | "infrastructure_error"
+  | "completed";
+
+export type QueueSubtaskStatus =
+  | "pending"
+  | "running"
+  | "waiting_review"
+  | "completed"
+  | "rejected"
+  | "infrastructure_error";
+
+export interface QueueSubtaskCreatePayload extends TaskCreatePayload {}
+
+export interface QueueCreatePayload {
+  name: string;
+  subtasks: QueueSubtaskCreatePayload[];
+}
+
+export interface QueueSubtaskData extends QueueSubtaskCreatePayload {
+  task_id: string;
+  sequence: number;
+  status: QueueSubtaskStatus;
+  machine_status: TaskStatus | null;
+  review_status: ReviewStatus;
+  thread_id: string | null;
+  last_error_summary: string;
+  updated_at: string;
+}
+
+export interface QueueData {
+  queue_id: string;
+  name: string;
+  status: QueueStatus;
+  base_ref: string;
+  base_commit: string;
+  current_task_id: string | null;
+  cumulative_diff_sha256: string;
+  last_error_summary: string;
+  subtasks: QueueSubtaskData[];
+  started_at: string;
+  updated_at: string;
+  finished_at: string | null;
+  report_url: string | null;
+  diff_url: string | null;
 }
 
 export interface ApiResponse<T> {

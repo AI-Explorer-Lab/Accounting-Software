@@ -1,6 +1,6 @@
 # Codex Orchestrator
 
-这是一个本机、单项目、单任务的 Loop Engineering 基础 harness。它把每条需求放进独立 Git worktree，让 Codex 在最小权限下修改代码，由 Python 执行固定验证，并把机器结果交给人工做一次最终审查。
+这是一个本机、单项目、严格串行的 Loop Engineering 基础 harness。单任务仍按原方式运行；人工拆分的长任务按页面中的子任务顺序逐个执行，每个子任务都放进独立 Git worktree，让 Codex 在最小权限下修改代码，由 Python 执行固定验证，并经过人工审查后才进入下一项。
 
 ```text
 原仓库（控制面）
@@ -8,7 +8,8 @@
 ├── .codex-orchestrator/
 │   ├── active.lock
 │   ├── worktrees/<task-id>/       codex/<task-id> 专用工作区
-│   └── runs/<task-id>/            状态、事件和审计产物
+│   ├── runs/<task-id>/            单任务状态、事件和审计产物
+│   └── queues/<queue-id>/         长任务与嵌套的子任务运行记录
 └── orchestrator/
 
 任务流程
@@ -21,6 +22,13 @@ Codex turn 流式事件 → 固定验证 → 最多三轮修复
 最终 diff + machine_status
    ↓
 人工提交一次 review_status
+
+长任务流程
+人工填写子任务顺序
+   ↓
+子任务 1 → 机器验证 → 人工批准
+   ↓ 累计 Diff 作为下一 worktree 的 index 基线
+子任务 2 → 机器验证 → 人工批准 → …… → 队列完成
 ```
 
 ## 运行方式
@@ -40,6 +48,9 @@ npm ci --prefix orchestrator/frontend
 ```bash
 python -m orchestrator.codex_loop start --task-file orchestrator/task.example.json
 python -m orchestrator.codex_loop resume --task-id <task-id>
+python -m orchestrator.codex_loop queue-start --task-file orchestrator/queue.example.json
+python -m orchestrator.codex_loop queue-show --queue-id <queue-id>
+python -m orchestrator.codex_loop queue-resume --queue-id <queue-id>
 ```
 
 `active.lock` 只表示某个 orchestrator 进程当前占用执行权。进程意外退出后，
@@ -58,7 +69,7 @@ python -m orchestrator.codex_loop review \
   --reviewed-diff-sha256 <raw-diff-sha256>
 ```
 
-`decision` 还可填写 `changes_requested` 或 `rejected`。审查结论与当时的原始 diff SHA-256 绑定，只能提交一次；worktree 在审查前发生变化、diff 含疑似密钥或任务尚未结束时都会拒绝提交。
+`decision` 还可填写 `changes_requested` 或 `rejected`。审查结论与当时的原始 diff SHA-256 绑定。单任务只记录一次结论；长任务子任务会追加保存每次审查，`changes_requested` 继续使用相同 worktree 和 thread，`rejected` 停止整个队列。worktree 在审查前发生变化、diff 含疑似密钥或任务尚未结束时都会拒绝提交。
 
 网页版可用一个脚本启动：
 
@@ -76,6 +87,7 @@ python -m orchestrator.codex_loop review \
 - `machine_status=infrastructure_error`：隔离、权限、SDK 或本地工具发生故障。
 - `review_status=pending`：机器流程结束，但尚无人工结论。
 - `approved`、`changes_requested`、`rejected`：人工针对一份确定 diff 提交的最终结论。
+- 长任务只有当前子任务机器验证通过且人工 `approved` 才会进入下一项；`waiting_review`、`changes_requested` 和 `infrastructure_error` 都会暂停队列。
 
 本系统不会自动 commit、push、创建 PR、合并 main/master、连接生产数据库、运行迁移或部署。`approved` 也只表示该份 diff 被本地审查人接受。
 
@@ -107,6 +119,18 @@ python -m orchestrator.codex_loop review \
 └── report.md                 面向人的汇总
 ```
 
+包含至少两个子任务的长任务单独保存，不复制进顶层 `runs`：
+
+```text
+.codex-orchestrator/queues/<queue-id>/
+├── queue.json                不可变的名称、基线与子任务顺序
+├── state.json                当前子任务和整体状态
+├── events.jsonl              只追加的调度与审查事件
+├── changes/cumulative.diff   已批准代码相对原始基线的累计 Diff
+├── subtasks/<task-id>/       子任务自己的完整运行与审查历史
+└── report.md                 长任务汇总
+```
+
 没有 `schema_version` 的旧任务按 `legacy_v0` 只读展示，并明确标注“历史记录不完整”。系统不会为旧记录补造缺失的 worktree、权限、prompt、diff 或审查信息，也不会恢复或审查旧任务。
 
 ## 核心模块
@@ -119,8 +143,9 @@ python -m orchestrator.codex_loop review \
 | `codex_client.py` | 固定 SDK/runtime、deny-all thread、turn stream 和恢复核对 |
 | `validation_runner.py` | 在任务 worktree 内执行固定分层验证 |
 | `workflow.py` | 串联隔离、权限、Codex、验证、重试和机器结论 |
-| `review.py` | CLI/API 共用的不可变人工审查规则 |
-| `state.py` | 原子持久化、单任务锁和敏感信息脱敏 |
+| `queue_workflow.py` | 固定顺序调度、人工审查门禁、累计 Diff 交接与故障恢复 |
+| `review.py` | CLI/API 共用的单任务审查与队列追加审查规则 |
+| `state.py` | 原子持久化、全局单执行锁、队列目录和敏感信息脱敏 |
 | `report.py` 与 `templates/` | 渲染实际 prompt 和人工报告 |
 
 ## 测试
@@ -132,4 +157,4 @@ npm --prefix orchestrator/frontend test
 npm --prefix orchestrator/frontend run build
 ```
 
-`orchestrator/tests/` 包含真实临时 Git 仓库测试，覆盖 worktree 身份、main 不变、脏改动不带入、权限收窄、事件顺序、完整 diff、敏感信息阻断、恢复和人工审查不可覆盖。
+`orchestrator/tests/` 包含真实临时 Git 仓库测试，覆盖 worktree 身份、main 不变、脏改动不带入、权限收窄、事件顺序、完整 diff、敏感信息阻断、队列严格顺序、累计 Diff 继承、返修审查历史、驳回和故障恢复。

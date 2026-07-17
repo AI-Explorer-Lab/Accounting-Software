@@ -19,6 +19,8 @@ class TaskSnapshot:
     thread_id: str | None = None
     turn_count: int = 0
     failure_count: int = 0
+    cycle_turn_count: int = 0
+    cycle_failure_count: int = 0
     rounds: list[dict[str, Any]] = field(default_factory=list)
     last_error_summary: str = ""
     infrastructure_error: str | None = None
@@ -35,6 +37,9 @@ class TaskSnapshot:
     final_diff_sha256: str = ""
     diff_redaction_count: int = 0
     review: dict[str, Any] | None = None
+    review_history: list[dict[str, Any]] = field(default_factory=list)
+    queue_id: str | None = None
+    sequence: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -51,6 +56,8 @@ class TaskSnapshot:
             "thread_id": self.thread_id,
             "turn_count": self.turn_count,
             "failure_count": self.failure_count,
+            "cycle_turn_count": self.cycle_turn_count,
+            "cycle_failure_count": self.cycle_failure_count,
             "rounds": list(self.rounds),
             "last_error_summary": self.last_error_summary,
             "infrastructure_error": self.infrastructure_error,
@@ -67,4 +74,71 @@ class TaskSnapshot:
             "final_diff_sha256": self.final_diff_sha256,
             "diff_redaction_count": self.diff_redaction_count,
             "review": None if self.review is None else dict(self.review),
+            "review_history": list(self.review_history),
+            "queue_id": self.queue_id,
+            "sequence": self.sequence,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class QueueSubtaskSnapshot:
+    task_id: str
+    sequence: int
+    requirement: str
+    acceptance_criteria: list[str]
+    status: str
+    machine_status: str | None
+    review_status: str
+    thread_id: str | None
+    last_error_summary: str
+    updated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "sequence": self.sequence,
+            "requirement": self.requirement,
+            "acceptance_criteria": list(self.acceptance_criteria),
+            "status": self.status,
+            "machine_status": self.machine_status,
+            "review_status": self.review_status,
+            "thread_id": self.thread_id,
+            "last_error_summary": self.last_error_summary,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class QueueSnapshot:
+    queue_id: str
+    name: str
+    status: str
+    base_ref: str
+    base_commit: str
+    current_task_id: str | None
+    cumulative_diff_sha256: str
+    last_error_summary: str
+    subtasks: list[QueueSubtaskSnapshot]
+    started_at: str
+    updated_at: str
+    finished_at: str | None
+    report_url: str | None = None
+    diff_url: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "queue_id": self.queue_id,
+            "name": self.name,
+            "status": self.status,
+            "base_ref": self.base_ref,
+            "base_commit": self.base_commit,
+            "current_task_id": self.current_task_id,
+            "cumulative_diff_sha256": self.cumulative_diff_sha256,
+            "last_error_summary": self.last_error_summary,
+            "subtasks": [task.to_dict() for task in self.subtasks],
+            "started_at": self.started_at,
+            "updated_at": self.updated_at,
+            "finished_at": self.finished_at,
+            "report_url": self.report_url,
+            "diff_url": self.diff_url,
         }

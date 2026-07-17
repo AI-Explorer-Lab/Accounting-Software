@@ -19,8 +19,16 @@ from orchestrator.codex_loop.models import (
     generate_task_id,
     utc_now_iso,
 )
-from orchestrator.codex_loop.report import ReportBuilder, render_repair_prompt
-from orchestrator.codex_loop.state import ActiveRunError, StateStore
+from orchestrator.codex_loop.report import (
+    PromptRenderer,
+    ReportBuilder,
+    render_repair_prompt,
+)
+from orchestrator.codex_loop.state import (
+    ActiveRunError,
+    StateStore,
+    redact_sensitive_text,
+)
 
 
 class StateAndReportTests(unittest.TestCase):
@@ -120,6 +128,18 @@ class StateAndReportTests(unittest.TestCase):
         self.assertEqual(
             json.loads(json.dumps(command.to_dict())),
             command.to_dict(),
+        )
+
+    def test_redaction_does_not_treat_standard_pwd_as_a_password(self) -> None:
+        workspace_path = "/workspace/accounting"
+
+        self.assertEqual(
+            redact_sensitive_text(workspace_path, environ={"PWD": workspace_path}),
+            workspace_path,
+        )
+        self.assertEqual(
+            redact_sensitive_text("database-secret", environ={"DB_PWD": "database-secret"}),
+            "[REDACTED]",
         )
 
     def test_state_store_atomically_round_trips_all_artifacts(self) -> None:
@@ -337,6 +357,28 @@ class StateAndReportTests(unittest.TestCase):
         self.assertIn("[truncated", prompt)
         self.assertNotIn("X" * 1_000, prompt)
         self.assertLess(len(prompt), 3_000)
+
+    def test_all_codex_prompts_use_git_ls_files_for_project_inventory(self) -> None:
+        task = self._task("prompt-file-listing")
+        state = RunState(task_id=task.task_id, repo_root=str(self.repo_root))
+        validation_round = ValidationRound(
+            round_number=1,
+            passed=False,
+            failure_summary="targeted validation failed",
+        )
+        renderer = PromptRenderer()
+
+        prompts = (
+            renderer.initial_prompt(task, state),
+            renderer.repair_prompt(task, state, validation_round),
+            renderer.review_repair_prompt(task, state, "请修复审查问题"),
+        )
+
+        expected = "git ls-files --cached --others --exclude-standard"
+        for prompt in prompts:
+            with self.subTest(prompt=prompt[:40]):
+                self.assertIn(expected, prompt)
+                self.assertIn("不要执行 `rg`", prompt)
 
     def test_all_final_status_reports_include_required_audit_fields(self) -> None:
         cases = (

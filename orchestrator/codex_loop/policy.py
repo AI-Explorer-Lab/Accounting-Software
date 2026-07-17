@@ -266,6 +266,7 @@ class ExecutionPolicy:
         """Write the single external Seatbelt boundary for App Server + tools."""
 
         readable_paths = self._seatbelt_read_paths()
+        readable_files = self._node_package_scope_manifests()
         worktree = str(self.workspace.worktree)
         auth_path = self.codex_home_dir / "auth.json"
         worktree_git_file = self.workspace.worktree / ".git"
@@ -288,6 +289,10 @@ class ExecutionPolicy:
             f"(allow file-read* (subpath {json.dumps(path)}))"
             for path in readable_paths
             if Path(path).exists() and path != worktree
+        )
+        lines.extend(
+            f"(allow file-read* (literal {json.dumps(str(path))}))"
+            for path in readable_files
         )
         lines.extend(
             f"(deny process-exec (literal {json.dumps(str(path))}))"
@@ -341,6 +346,22 @@ class ExecutionPolicy:
             )
         )
 
+    def _node_package_scope_manifests(self) -> tuple[Path, ...]:
+        """Allow Node to read only package-scope manifests used by shared deps."""
+
+        candidates = [
+            self.control_repo_root / "frontend/package.json",
+            self.control_repo_root / "orchestrator/package.json",
+            self.control_repo_root / "orchestrator/frontend/package.json",
+        ]
+        candidates.extend(
+            parent / "package.json"
+            for parent in (self.control_repo_root, *self.control_repo_root.parents)
+        )
+        return tuple(
+            dict.fromkeys(path for path in candidates if path.is_file())
+        )
+
     def validation_command_prefix(self) -> tuple[str, ...]:
         """Return the OS sandbox wrapper for fixed validation commands."""
 
@@ -353,6 +374,7 @@ class ExecutionPolicy:
             raise InfrastructureError("macOS sandbox-exec is unavailable")
         profile_path = self.runtime_root / "validation.sb"
         readable_paths = self._seatbelt_read_paths()
+        readable_files = self._node_package_scope_manifests()
         auth_path = self.codex_home_dir / "auth.json"
         worktree_git_file = self.workspace.worktree / ".git"
         lines = [
@@ -373,6 +395,10 @@ class ExecutionPolicy:
             f"(allow file-read* (subpath {json.dumps(path)}))"
             for path in dict.fromkeys(readable_paths)
             if Path(path).exists()
+        )
+        lines.extend(
+            f"(allow file-read* (literal {json.dumps(str(path))}))"
+            for path in readable_files
         )
         lines.extend(
             [
