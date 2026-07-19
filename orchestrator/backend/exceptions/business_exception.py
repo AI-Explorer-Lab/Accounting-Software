@@ -60,6 +60,15 @@ class ReviewConflictError(BusinessException):
         )
 
 
+class WorkspaceOpenError(BusinessException):
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            code=ErrorCode.WORKSPACE_OPEN_FAILED,
+            status_code=503,
+        )
+
+
 class InvalidQueueIdError(BusinessException):
     def __init__(self) -> None:
         super().__init__(

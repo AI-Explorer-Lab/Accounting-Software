@@ -58,14 +58,18 @@ const knowledgeItems = computed<Record<string, unknown>[]>(() =>
 
 async function submit(payload: { decision: ReviewDecision; reviewer: string; comment: string; commit_subject: string }): Promise<void> {
   const queued = Boolean(store.task.value?.queue_id);
-  if (await store.submitReview(payload) && queued) await router.push("/monitor");
+  if (!await store.submitReview(payload)) return;
+  if (payload.decision === "approved" && !queued) {
+    await store.openCurrentTaskInVSCode();
+  }
+  if (queued) await router.push("/monitor");
 }
 </script>
 
 <template>
   <div class="view-stack review-view">
     <header class="view-header">
-      <div><span class="section-kicker">最终人工关口</span><h1>审核</h1><p>批准会绑定当前可见 Diff 和 commit subject，在任务分支创建一次 commit；不会 merge 或 push。</p></div>
+      <div><span class="section-kicker">最终人工关口</span><h1>审核</h1><p>批准会绑定当前可见 Diff 和 commit subject，在任务分支创建一次 commit；单任务提交成功后会在当前 VS Code 窗口打开该分支，不会 merge 或 push。</p></div>
       <span class="safety-statement"><i>✓</i> 本地不可变记录</span>
     </header>
 

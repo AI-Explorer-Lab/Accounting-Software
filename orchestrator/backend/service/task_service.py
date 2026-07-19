@@ -19,14 +19,17 @@ from ..exceptions.business_exception import (
     TaskConflictError,
     TaskNotFoundError,
     TaskNotReadyError,
+    WorkspaceOpenError,
 )
 from ..mapper.file_run import FileRunMapper
 from ..utils.task_executor import TaskExecutor
+from .vscode_workspace import VSCodeWorkspaceError, VSCodeWorkspaceOpener
 
 
 WorkflowFactory = Callable[[], OrchestrationWorkflow]
 QueueWorkflowFactory = Callable[[], QueueWorkflow]
 ArchiveCallback = Callable[[str, Any], dict[str, Any]]
+WorkspaceOpenCallback = Callable[[Path, str, str], None]
 
 
 class TaskService:
@@ -45,6 +48,7 @@ class TaskService:
         delivery_service: GitDeliveryService | None = None,
         archive_callback: ArchiveCallback | None = None,
         archive_retry_callback: ArchiveCallback | None = None,
+        workspace_opener: WorkspaceOpenCallback | None = None,
     ) -> None:
         self.repo_root = Path(repo_root).expanduser().resolve()
         self.executor = executor or TaskExecutor()
@@ -59,6 +63,9 @@ class TaskService:
         self.delivery_service = delivery_service or GitDeliveryService(self.repo_root)
         self.archive_callback = archive_callback
         self.archive_retry_callback = archive_retry_callback
+        self.workspace_opener = (
+            workspace_opener or VSCodeWorkspaceOpener().open_reusing_window
+        )
         self.queue_store = QueueStore(self.repo_root)
         self.queue_workflow_factory = queue_workflow_factory or (
             lambda: QueueWorkflow(
@@ -381,6 +388,54 @@ class TaskService:
         snapshot = mapper.load_snapshot(task_id)
         if snapshot is None:
             raise TaskNotFoundError(task_id)
+        return snapshot
+
+    def open_task_in_vscode(self, task_id: str) -> TaskSnapshot:
+        self._validate_task_id(task_id)
+        mapper, queue_id = self._mapper_for_task(task_id)
+        if mapper.load_task(task_id) is None:
+            raise TaskNotFoundError(task_id)
+        if queue_id is not None:
+            raise TaskConflictError(
+                "Queued subtasks do not automatically replace the current VS Code window"
+            )
+
+        snapshot = mapper.load_snapshot(task_id)
+        if snapshot is None:
+            raise TaskNotFoundError(task_id)
+        commit_sha = str(snapshot.commit.get("commit_sha", ""))
+        if (
+            snapshot.review_status != "approved"
+            or snapshot.commit.get("status") != "committed"
+            or not commit_sha
+        ):
+            raise TaskConflictError(
+                "Task worktree can only be opened after an approved commit succeeds"
+            )
+
+        state = mapper.store.load_state(task_id)
+        worktrees_root = (
+            self.repo_root / ".codex-orchestrator" / "worktrees"
+        ).resolve()
+        expected_worktree = (worktrees_root / task_id).resolve()
+        try:
+            expected_worktree.relative_to(worktrees_root)
+        except ValueError:
+            raise TaskConflictError("Recorded task worktree path is invalid") from None
+        recorded_worktree = (
+            self.repo_root / state.worktree_relative_path
+        ).resolve()
+        if recorded_worktree != expected_worktree:
+            raise TaskConflictError("Recorded task worktree path is invalid")
+
+        try:
+            self.workspace_opener(
+                expected_worktree,
+                state.task_branch,
+                commit_sha,
+            )
+        except VSCodeWorkspaceError as exc:
+            raise WorkspaceOpenError(str(exc)) from exc
         return snapshot
 
     def close(self, *, wait: bool = False) -> None:

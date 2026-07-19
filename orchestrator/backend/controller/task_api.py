@@ -136,3 +136,17 @@ async def retry_archive(task_id: str, request: Request) -> ApiResponse[TaskData]
         _service(request).retry_archive, task_id
     )
     return _response(request, snapshot)
+
+
+@router.post(
+    "/{task_id}/workspace/vscode",
+    response_model=ApiResponse[TaskData],
+)
+async def open_task_in_vscode(
+    task_id: str,
+    request: Request,
+) -> ApiResponse[TaskData]:
+    snapshot = await run_in_threadpool(
+        _service(request).open_task_in_vscode, task_id
+    )
+    return _response(request, snapshot)

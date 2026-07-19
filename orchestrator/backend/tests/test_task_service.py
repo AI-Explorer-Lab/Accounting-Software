@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from threading import BoundedSemaphore, Event
 
@@ -15,6 +16,7 @@ from orchestrator.backend.service.task_service import TaskService
 from orchestrator.backend.utils.task_executor import TaskExecutor
 from orchestrator.codex_loop.models import (
     DeliveryStatus,
+    ReviewStatus,
     RunResult,
     TaskQueueSpec,
     TaskSpec,
@@ -349,3 +351,66 @@ def test_archive_initial_and_retry_callbacks_use_separate_checkpoints(
 
     assert calls == ["archive:archive-callback", "retry:archive-callback"]
     assert snapshot.delivery_status == "archived"
+
+
+def test_approved_commit_opens_only_its_recorded_task_worktree(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path)
+    task = TaskSpec(
+        task_id="open-in-vscode",
+        requirement="Open committed work",
+        acceptance_criteria=["Uses the current VS Code window"],
+    )
+    state = store.initialize_run(task)
+    state.mark_success()
+    state.review_status = ReviewStatus.APPROVED
+    state.delivery_status = DeliveryStatus.ARCHIVED
+    state.task_branch = f"codex/{task.task_id}"
+    state.worktree_relative_path = f".codex-orchestrator/worktrees/{task.task_id}"
+    state.repo_root = str(tmp_path / state.worktree_relative_path)
+    store.save_state(state)
+    worktree = Path(state.repo_root)
+    worktree.mkdir(parents=True)
+    commit_sha = "c" * 40
+    commit_path = store.run_dir(task.task_id) / "delivery" / "commit.json"
+    commit_path.parent.mkdir(parents=True)
+    commit_path.write_text(
+        json.dumps({"status": "committed", "commit_sha": commit_sha}),
+        encoding="utf-8",
+    )
+    opened: list[tuple[Path, str, str]] = []
+    service = TaskService(
+        tmp_path,
+        workspace_opener=lambda path, branch, commit: opened.append(
+            (path, branch, commit)
+        ),
+    )
+    try:
+        snapshot = service.open_task_in_vscode(task.task_id)
+    finally:
+        service.close(wait=True)
+
+    assert snapshot.commit["commit_sha"] == commit_sha
+    assert opened == [(worktree, state.task_branch, commit_sha)]
+
+
+def test_uncommitted_task_cannot_open_in_vscode(tmp_path: Path) -> None:
+    store = StateStore(tmp_path)
+    task = TaskSpec(
+        task_id="not-committed",
+        requirement="Stay closed",
+        acceptance_criteria=["Requires an approved commit"],
+    )
+    state = store.initialize_run(task)
+    state.mark_success()
+    store.save_state(state)
+    service = TaskService(
+        tmp_path,
+        workspace_opener=lambda *_arguments: pytest.fail("opener must not run"),
+    )
+    try:
+        with pytest.raises(TaskConflictError, match="approved commit"):
+            service.open_task_in_vscode(task.task_id)
+    finally:
+        service.close(wait=True)

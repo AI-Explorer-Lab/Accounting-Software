@@ -15,6 +15,7 @@ class FakeTaskService:
         self.rerun: str | None = None
         self.reviewed_commit_subject: str | None = None
         self.retried: str | None = None
+        self.opened_in_vscode: str | None = None
 
     def start_task(
         self,
@@ -81,6 +82,16 @@ class FakeTaskService:
         self.retried = f"archive:{task_id}"
         values = _snapshot(task_id=task_id, status="success").to_dict()
         values["delivery_status"] = "archived"
+        return TaskSnapshot(**values)
+
+    def open_task_in_vscode(self, task_id: str) -> TaskSnapshot:
+        self.opened_in_vscode = task_id
+        values = _snapshot(task_id=task_id, status="success").to_dict()
+        values.update(
+            review_status="approved",
+            delivery_status="archived",
+            commit={"status": "committed", "commit_sha": "a" * 40},
+        )
         return TaskSnapshot(**values)
 
 
@@ -216,6 +227,16 @@ def test_delivery_and_archive_retry_endpoints_are_separate() -> None:
     assert archived.status_code == 202
     assert archived.json()["data"]["delivery_status"] == "archived"
     assert service.retried == "archive:task-9"
+
+
+def test_open_vscode_endpoint_uses_the_recorded_task() -> None:
+    service = FakeTaskService()
+    with _client(service) as client:
+        response = client.post("/api/tasks/task-9/workspace/vscode")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["commit"]["status"] == "committed"
+    assert service.opened_in_vscode == "task-9"
 
 
 def test_conflict_is_returned_as_structured_409() -> None:
