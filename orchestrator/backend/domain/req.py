@@ -1,6 +1,7 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
+from typing import Any
 
 
 class TaskCreateRequest(BaseModel):
@@ -50,6 +51,7 @@ class ReviewRequest(BaseModel):
     reviewer: str = Field(min_length=1, max_length=200)
     comment: str = Field(default="", max_length=10_000)
     reviewed_diff_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    commit_subject: str = Field(default="", max_length=200)
 
     @field_validator("reviewer")
     @classmethod
@@ -63,6 +65,14 @@ class ReviewRequest(BaseModel):
     @classmethod
     def normalize_comment(cls, value: str) -> str:
         return value.strip()
+
+    @field_validator("commit_subject")
+    @classmethod
+    def normalize_commit_subject(cls, value: str) -> str:
+        subject = value.strip()
+        if "\n" in subject or "\r" in subject:
+            raise ValueError("commit_subject must be a single line")
+        return subject
 
 
 class QueueReorderRequest(BaseModel):
@@ -87,3 +97,28 @@ class NotificationSettingsRequest(BaseModel):
 
 class QueueVersionRequest(BaseModel):
     expected_updated_at: str | None = None
+
+
+class PlanCreateRequest(TaskCreateRequest):
+    name: str = Field(min_length=1, max_length=500)
+
+    @field_validator("name")
+    @classmethod
+    def validate_plan_name(cls, value: str) -> str:
+        name = value.strip()
+        if not name:
+            raise ValueError("name cannot be blank")
+        return name
+
+
+class PlanConfirmRequest(BaseModel):
+    reviewer: str = Field(min_length=1, max_length=200)
+    edited_draft: dict[str, Any] | None = None
+
+    @field_validator("reviewer")
+    @classmethod
+    def validate_plan_reviewer(cls, value: str) -> str:
+        reviewer = value.strip()
+        if not reviewer:
+            raise ValueError("reviewer cannot be blank")
+        return reviewer

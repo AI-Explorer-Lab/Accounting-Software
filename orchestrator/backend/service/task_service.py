@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from threading import RLock
-from typing import Callable
+from typing import Any, Callable
 
-from orchestrator.codex_loop.models import QueueStatus, TaskSpec
+from orchestrator.codex_loop.models import DeliveryStatus, QueueStatus, TaskSpec
 from orchestrator.codex_loop.queue_workflow import QueueWorkflow
 from orchestrator.codex_loop.review import ReviewError, ReviewService
+from orchestrator.codex_loop.git_delivery import DeliveryError, GitDeliveryService
 from orchestrator.codex_loop.state import QueueStore, redact_sensitive_text
 from orchestrator.codex_loop.workflow import OrchestrationWorkflow
 
@@ -25,6 +26,7 @@ from ..utils.task_executor import TaskExecutor
 
 WorkflowFactory = Callable[[], OrchestrationWorkflow]
 QueueWorkflowFactory = Callable[[], QueueWorkflow]
+ArchiveCallback = Callable[[str, Any], dict[str, Any]]
 
 
 class TaskService:
@@ -40,6 +42,9 @@ class TaskService:
         workflow_factory: WorkflowFactory | None = None,
         review_service: ReviewService | None = None,
         queue_workflow_factory: QueueWorkflowFactory | None = None,
+        delivery_service: GitDeliveryService | None = None,
+        archive_callback: ArchiveCallback | None = None,
+        archive_retry_callback: ArchiveCallback | None = None,
     ) -> None:
         self.repo_root = Path(repo_root).expanduser().resolve()
         self.executor = executor or TaskExecutor()
@@ -51,6 +56,9 @@ class TaskService:
             )
         )
         self.review_service = review_service or ReviewService(self.repo_root)
+        self.delivery_service = delivery_service or GitDeliveryService(self.repo_root)
+        self.archive_callback = archive_callback
+        self.archive_retry_callback = archive_retry_callback
         self.queue_store = QueueStore(self.repo_root)
         self.queue_workflow_factory = queue_workflow_factory or (
             lambda: QueueWorkflow(
@@ -72,6 +80,20 @@ class TaskService:
             acceptance_criteria=acceptance_criteria,
             rerun_of=rerun_of,
         )
+        with self._submission_lock:
+            self._ensure_available()
+            try:
+                self.executor.submit(
+                    task,
+                    lambda: self.workflow_factory().start(task),
+                )
+            except RuntimeError as exc:
+                raise TaskConflictError(str(exc)) from exc
+        return self._accepted_snapshot(task)
+
+    def start_spec(self, task: TaskSpec) -> TaskSnapshot:
+        """Start one immutable TaskSpec produced by a confirmed Plan."""
+
         with self._submission_lock:
             self._ensure_available()
             try:
@@ -261,6 +283,7 @@ class TaskService:
         reviewer: str,
         comment: str,
         reviewed_diff_sha256: str,
+        commit_subject: str = "",
     ) -> TaskSnapshot:
         self._validate_task_id(task_id)
         mapper, queue_id = self._mapper_for_task(task_id)
@@ -268,13 +291,17 @@ class TaskService:
             raise TaskNotFoundError(task_id)
         try:
             if queue_id is None:
-                self.review_service.record(
+                review = self.review_service.record(
                     task_id,
                     decision=decision,
                     reviewer=reviewer,
                     comment=comment,
                     reviewed_diff_sha256=reviewed_diff_sha256,
+                    commit_subject=commit_subject,
                 )
+                if review.decision.value == "approved":
+                    self.delivery_service.deliver(task_id, review=review)
+                    self._archive_after_commit(task_id, mapper.store)
             else:
                 workflow = self.queue_workflow_factory()
                 queue_state, _ = workflow.record_review(
@@ -284,21 +311,98 @@ class TaskService:
                     reviewer=reviewer,
                     comment=comment,
                     reviewed_diff_sha256=reviewed_diff_sha256,
+                    commit_subject=commit_subject,
                 )
+                if decision == "approved":
+                    child_store = workflow.queue_store.subtask_store(queue_id)
+                    refreshed_child = child_store.load_state(task_id)
+                    refreshed_queue = workflow.queue_store.load_state(queue_id)
+                    refreshed_queue.task(task_id).delivery_status = (
+                        refreshed_child.delivery_status
+                    )
+                    workflow.queue_store.save_state(refreshed_queue)
+                    queue_state = refreshed_queue
                 if queue_state.status in {QueueStatus.PENDING, QueueStatus.RUNNING}:
                     self.executor.submit_operation(
                         queue_id,
                         lambda: workflow.run_current(queue_id),
                     )
-        except (ReviewError, RuntimeError, ValueError) as exc:
+        except (ReviewError, DeliveryError, RuntimeError, ValueError) as exc:
             raise ReviewConflictError(str(exc)) from exc
         snapshot = mapper.load_snapshot(task_id)
         if snapshot is None:  # pragma: no cover - guarded by persisted task/state
             raise TaskNotFoundError(task_id)
         return snapshot
 
+    def retry_commit(self, task_id: str) -> TaskSnapshot:
+        self._validate_task_id(task_id)
+        mapper, queue_id = self._mapper_for_task(task_id)
+        if mapper.load_task(task_id) is None:
+            raise TaskNotFoundError(task_id)
+        review = (
+            mapper.store.load_latest_review(task_id)
+            if queue_id is not None
+            else mapper.store.load_review(task_id)
+        )
+        try:
+            if queue_id is None:
+                GitDeliveryService(self.repo_root, store=mapper.store).deliver(
+                    task_id, review=review
+                )
+                self._archive_after_commit(task_id, mapper.store)
+            else:
+                workflow = self.queue_workflow_factory()
+                queue_state = workflow.recover_approved_delivery(
+                    queue_id, task_id
+                )
+                if queue_state.status in {QueueStatus.PENDING, QueueStatus.RUNNING}:
+                    self.executor.submit_operation(
+                        queue_id,
+                        lambda: workflow.run_current(queue_id),
+                    )
+        except (DeliveryError, RuntimeError, ValueError) as exc:
+            raise ReviewConflictError(str(exc)) from exc
+        snapshot = mapper.load_snapshot(task_id)
+        if snapshot is None:
+            raise TaskNotFoundError(task_id)
+        return snapshot
+
+    def retry_archive(self, task_id: str) -> TaskSnapshot:
+        self._validate_task_id(task_id)
+        mapper, _queue_id = self._mapper_for_task(task_id)
+        if mapper.load_task(task_id) is None:
+            raise TaskNotFoundError(task_id)
+        if self.archive_retry_callback is None:
+            raise ReviewConflictError("archive capability is unavailable")
+        try:
+            self.archive_retry_callback(task_id, store=mapper.store)
+        except Exception as exc:
+            raise ReviewConflictError(str(exc)) from exc
+        snapshot = mapper.load_snapshot(task_id)
+        if snapshot is None:
+            raise TaskNotFoundError(task_id)
+        return snapshot
+
     def close(self, *, wait: bool = False) -> None:
         self.executor.shutdown(wait=wait)
+
+    def _archive_after_commit(self, task_id: str, store: Any) -> None:
+        if self.archive_callback is None:
+            return
+        try:
+            self.archive_callback(task_id, store=store)
+        except Exception as exc:
+            state = store.load_state(task_id)
+            state.delivery_status = DeliveryStatus.FAILED
+            state.last_error_summary = redact_sensitive_text(
+                str(exc) or type(exc).__name__
+            )
+            store.save_state(state)
+            store.append_event(
+                task_id,
+                "knowledge.write_failed",
+                {"error": state.last_error_summary},
+            )
 
     def _ensure_available(self) -> None:
         active_task_id = self.executor.active_task_id()

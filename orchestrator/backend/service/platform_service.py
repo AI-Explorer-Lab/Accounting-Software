@@ -33,6 +33,7 @@ class HistoryItem:
     updated_at: str
     finished_at: str | None
     current_task_id: str | None = None
+    delivery_status: str | None = None
 
 
 class PlatformService:
@@ -51,6 +52,7 @@ class PlatformService:
                 "repo_root": str(context.repo_root),
                 "is_default": context.is_default,
                 "active_identifier": context.task_service.executor.active_task_id(),
+                "knowledge_actor_id": context.knowledge_actor_id,
             }
             for context in self.registry.all()
         ]
@@ -264,6 +266,7 @@ class PlatformService:
                     started_at=snapshot.started_at,
                     updated_at=snapshot.updated_at,
                     finished_at=snapshot.finished_at,
+                    delivery_status=snapshot.delivery_status,
                 )
         queue_mapper = FileQueueMapper(context.repo_root)
         if queue_mapper.store.queues_root.is_dir():
@@ -287,7 +290,93 @@ class PlatformService:
                     updated_at=snapshot.updated_at,
                     finished_at=snapshot.finished_at,
                     current_task_id=snapshot.current_task_id,
+                    delivery_status=snapshot.delivery_status,
                 )
+
+    def capabilities(self, project_id: str | None = None) -> dict[str, Any]:
+        context = self.registry.get(project_id)
+        if context.harness is None:
+            return {
+                "status": "unavailable",
+                "project_id": context.project_id,
+                "reason": "harness feature is disabled",
+            }
+        value = context.harness.capabilities()
+        value["project_id"] = context.project_id
+        value["knowledge_actor_id"] = context.knowledge_actor_id
+        value["checked_at"] = datetime.now().astimezone().isoformat(
+            timespec="milliseconds"
+        )
+        return value
+
+    def metrics(self, project_id: str | None = None) -> dict[str, Any]:
+        context = self.registry.get(project_id)
+        mapper = FileRunMapper(context.repo_root)
+        completed = 0
+        successes = 0
+        layer_failures = {
+            "syntax": 0,
+            "logic": 0,
+            "specification": 0,
+            "architecture": 0,
+        }
+        repair_rounds = 0
+        knowledge_tasks = 0
+        planned = 0
+        planner_edits = 0
+        committed = 0
+        commit_failed = 0
+        root = context.repo_root / ".codex-orchestrator"
+        run_roots = [path.parent for path in root.glob("runs/*/state.json")]
+        run_roots.extend(path.parent for path in root.glob("queues/*/subtasks/*/state.json"))
+        for run_dir in run_roots:
+            task_id = run_dir.name
+            try:
+                state = StateStore(
+                    context.repo_root, runs_root=run_dir.parent
+                ).load_state(task_id)
+            except (OSError, ValueError, json.JSONDecodeError):
+                continue
+            if state.status.is_final:
+                completed += 1
+            if state.status.value == "success":
+                successes += 1
+            repair_rounds += max(0, state.turn_count - 1)
+            aggregate = self._optional_json(run_dir / "evaluations/aggregate.json")
+            for finding in aggregate.get("blocking_findings", []):
+                layer = str(finding.get("layer", ""))
+                if layer in layer_failures:
+                    layer_failures[layer] += 1
+            if self._optional_json(run_dir / "context/generation.json").get("knowledge"):
+                knowledge_tasks += 1
+            confirmation = self._optional_json(run_dir / "plan/confirmation.json")
+            if confirmation:
+                planned += 1
+                planner_edits += int(confirmation.get("manual_edit_count", 0))
+            delivery = self._optional_json(run_dir / "delivery/commit.json")
+            if delivery.get("status") == "committed":
+                committed += 1
+            elif delivery.get("status") == "failed":
+                commit_failed += 1
+        backlog = (
+            context.harness._archive_backlog() if context.harness is not None else 0
+        )
+        return {
+            "project_id": context.project_id,
+            "task_success_rate": successes / completed if completed else None,
+            "completed_tasks": completed,
+            "layer_failure_counts": layer_failures,
+            "repair_rounds": repair_rounds,
+            "knowledge_hit_rate": knowledge_tasks / completed if completed else None,
+            "planned_tasks": planned,
+            "planner_manual_edit_count": planner_edits,
+            "commit_success_rate": (
+                committed / (committed + commit_failed)
+                if committed + commit_failed
+                else None
+            ),
+            "archive_backlog": backlog,
+        }
 
     def _artifact_root(
         self,
@@ -339,6 +428,16 @@ class PlatformService:
 
     def _notification_path(self, context: ProjectContext) -> Path:
         return context.repo_root / ".codex-orchestrator" / "notifications.json"
+
+    @staticmethod
+    def _optional_json(path: Path) -> dict[str, Any]:
+        if not path.is_file():
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
 
     def _notification_settings_path(self, context: ProjectContext) -> Path:
         return (

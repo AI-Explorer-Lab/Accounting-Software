@@ -11,6 +11,7 @@ from typing import Any
 
 from .audit import AuditRecorder
 from .models import (
+    DeliveryStatus,
     InfrastructureError,
     PromptKind,
     QueueState,
@@ -25,12 +26,15 @@ from .models import (
     utc_now_iso,
 )
 from .review import ReviewService
+from .git_delivery import GitDeliveryService
 from .state import ActiveRunError, QueueStore, StateStore, redact_sensitive_text
 from .workflow import OrchestrationWorkflow
 from .workspace import WorkspaceInfo
 
 
 WorkflowFactory = Callable[[StateStore, str, Path | None, str], Any]
+DeliveryFactory = Callable[[StateStore], GitDeliveryService]
+ArchiveCallback = Callable[..., Any]
 
 
 class QueueWorkflow:
@@ -43,11 +47,17 @@ class QueueWorkflow:
         queue_store: QueueStore | None = None,
         workflow_factory: WorkflowFactory | None = None,
         validation_timeout_seconds: float = 900.0,
+        delivery_factory: DeliveryFactory | None = None,
+        archive_callback: ArchiveCallback | None = None,
     ) -> None:
         self.repo_root = Path(repo_root).expanduser().resolve()
         self.queue_store = queue_store or QueueStore(self.repo_root)
         self.validation_timeout_seconds = validation_timeout_seconds
         self.workflow_factory = workflow_factory or self._default_workflow
+        self.delivery_factory = delivery_factory or (
+            lambda store: GitDeliveryService(self.repo_root, store=store)
+        )
+        self.archive_callback = archive_callback
 
     def prepare(
         self,
@@ -70,6 +80,37 @@ class QueueWorkflow:
         )
         spec.base_commit = self._resolve_commit(spec.base_ref)
         return self.queue_store.initialize_queue(spec)
+
+    def prepare_spec(self, spec: TaskQueueSpec) -> QueueState:
+        """Persist an already human-confirmed planner queue definition."""
+
+        self._assert_available()
+        if spec.base_commit:
+            raise ValueError("confirmed queue base_commit must be resolved at start")
+        spec.base_commit = self._resolve_commit(spec.base_ref)
+        state = self.queue_store.initialize_queue(spec)
+        confirmation_path = (
+            self.queue_store.queue_dir(spec.queue_id) / "plan/confirmation.json"
+        )
+        if confirmation_path.is_file():
+            confirmation = json.loads(confirmation_path.read_text(encoding="utf-8"))
+            self.queue_store.append_event(
+                spec.queue_id,
+                "plan.confirmed",
+                {
+                    "plan_id": confirmation.get("plan_id"),
+                    "reviewer": confirmation.get("reviewer"),
+                    "confirmed_plan_sha256": confirmation.get(
+                        "confirmed_plan_sha256"
+                    ),
+                    "manual_edit_count": confirmation.get("manual_edit_count", 0),
+                },
+            )
+        return state
+
+    def start_spec(self, spec: TaskQueueSpec) -> QueueState:
+        state = self.prepare_spec(spec)
+        return self.run_current(state.queue_id)
 
     def start(
         self,
@@ -230,6 +271,7 @@ class QueueWorkflow:
         reviewer: str,
         comment: str,
         reviewed_diff_sha256: str,
+        commit_subject: str = "",
     ) -> tuple[QueueState, ReviewRecord]:
         """Record a child review and update the parent queue atomically."""
 
@@ -254,13 +296,19 @@ class QueueWorkflow:
             reviewer=reviewer,
             comment=comment,
             reviewed_diff_sha256=reviewed_diff_sha256,
+            commit_subject=commit_subject,
         )
         child.review_status = review.decision
         child.updated_at = utc_now_iso()
 
         if review.decision is ReviewStatus.APPROVED:
             try:
-                self._promote_cumulative_diff(queue_id, task_id, state)
+                self._deliver_promote_and_archive(
+                    queue_id,
+                    task_id,
+                    state,
+                    review,
+                )
             except Exception as exc:
                 message = redact_sensitive_text(str(exc) or type(exc).__name__)
                 child.status = QueueTaskStatus.INFRASTRUCTURE_ERROR
@@ -271,7 +319,11 @@ class QueueWorkflow:
                 self.queue_store.append_event(
                     queue_id,
                     "cumulative_diff.infrastructure_error",
-                    {"task_id": task_id, "error": message},
+                    {
+                        "task_id": task_id,
+                        "error": message,
+                        "delivery_status": child.delivery_status.value,
+                    },
                 )
                 self._write_report(spec, state)
                 raise InfrastructureError(message) from exc
@@ -305,6 +357,7 @@ class QueueWorkflow:
                 "review_number": review.review_number,
                 "reviewer": review.reviewer,
                 "reviewed_diff_sha256": review.reviewed_diff_sha256,
+                "delivery_status": child.delivery_status.value,
             },
         )
         self._write_report(spec, state)
@@ -334,23 +387,7 @@ class QueueWorkflow:
                 raise InfrastructureError("queue has no current subtask to resume")
             child = state.task(state.current_task_id)
             if child.review_status is ReviewStatus.APPROVED:
-                self._promote_cumulative_diff(queue_id, child.task_id, state)
-                child.status = QueueTaskStatus.COMPLETED
-                child.last_error_summary = ""
-                state.current_task_id = None
-                state.last_error_summary = ""
-                if self._all_done(state):
-                    state.status = QueueStatus.COMPLETED
-                    state.finished_at = utc_now_iso()
-                else:
-                    state.status = QueueStatus.PENDING
-                self.queue_store.save_state(state)
-                self.queue_store.append_event(
-                    queue_id,
-                    "cumulative_diff.recovered",
-                    {"task_id": child.task_id},
-                )
-                self._write_report(self.queue_store.load_spec(queue_id), state)
+                state = self.recover_approved_delivery(queue_id, child.task_id)
                 if state.status is QueueStatus.COMPLETED:
                     return state
                 return self.run_current(queue_id)
@@ -395,6 +432,95 @@ class QueueWorkflow:
             state.last_error_summary = ""
             self.queue_store.save_state(state)
         return self.run_current(queue_id)
+
+    def recover_approved_delivery(
+        self, queue_id: str, task_id: str
+    ) -> QueueState:
+        """Retry only the approved child's delivery checkpoint, without starting the next."""
+
+        state = self.queue_store.load_state(queue_id)
+        if state.status is not QueueStatus.INFRASTRUCTURE_ERROR:
+            raise InfrastructureError("queue is not waiting on infrastructure recovery")
+        if state.current_task_id != task_id:
+            raise InfrastructureError("only the current queue subtask can be recovered")
+        child = state.task(task_id)
+        if child.review_status is not ReviewStatus.APPROVED:
+            raise InfrastructureError("queue subtask has no approved review to recover")
+        store = self.queue_store.subtask_store(queue_id)
+        review = store.load_latest_review(task_id)
+        try:
+            self._deliver_promote_and_archive(
+                queue_id,
+                task_id,
+                state,
+                review,
+            )
+        except Exception as exc:
+            message = redact_sensitive_text(str(exc) or type(exc).__name__)
+            child.status = QueueTaskStatus.INFRASTRUCTURE_ERROR
+            child.last_error_summary = message
+            state.status = QueueStatus.INFRASTRUCTURE_ERROR
+            state.last_error_summary = message
+            self.queue_store.save_state(state)
+            self.queue_store.append_event(
+                queue_id,
+                "commit.recovery_failed",
+                {"task_id": task_id, "error": message},
+            )
+            self._write_report(self.queue_store.load_spec(queue_id), state)
+            raise InfrastructureError(message) from exc
+        child.status = QueueTaskStatus.COMPLETED
+        child.last_error_summary = ""
+        state.current_task_id = None
+        state.last_error_summary = ""
+        if self._all_done(state):
+            state.status = QueueStatus.COMPLETED
+            state.finished_at = utc_now_iso()
+        else:
+            state.status = QueueStatus.PENDING
+        self.queue_store.save_state(state)
+        self.queue_store.append_event(
+            queue_id,
+            "cumulative_diff.recovered",
+            {
+                "task_id": task_id,
+                "delivery_status": child.delivery_status.value,
+            },
+        )
+        self._write_report(self.queue_store.load_spec(queue_id), state)
+        return state
+
+    def _deliver_promote_and_archive(
+        self,
+        queue_id: str,
+        task_id: str,
+        state: QueueState,
+        review: ReviewRecord,
+    ) -> None:
+        store = self.queue_store.subtask_store(queue_id)
+        self.delivery_factory(store).deliver(task_id, review=review)
+        child = state.task(task_id)
+        child.delivery_status = store.load_state(task_id).delivery_status
+        self._promote_cumulative_diff(queue_id, task_id, state)
+        self._archive_after_commit(task_id, store)
+        child.delivery_status = store.load_state(task_id).delivery_status
+
+    def _archive_after_commit(self, task_id: str, store: StateStore) -> None:
+        if self.archive_callback is None:
+            return
+        try:
+            self.archive_callback(task_id, store=store)
+        except Exception as exc:
+            message = redact_sensitive_text(str(exc) or type(exc).__name__)
+            run_state = store.load_state(task_id)
+            run_state.delivery_status = DeliveryStatus.FAILED
+            run_state.last_error_summary = message
+            store.save_state(run_state)
+            store.append_event(
+                task_id,
+                "knowledge.write_failed",
+                {"error": message},
+            )
 
     @staticmethod
     def _all_done(state: QueueState) -> bool:

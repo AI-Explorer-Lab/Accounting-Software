@@ -29,6 +29,7 @@ class ProjectData(BaseModel):
     repo_root: str
     is_default: bool
     active_identifier: str | None = None
+    knowledge_actor_id: str = ""
 
 
 class HistoryItemData(BaseModel):
@@ -43,6 +44,7 @@ class HistoryItemData(BaseModel):
     updated_at: str
     finished_at: str | None = None
     current_task_id: str | None = None
+    delivery_status: str | None = None
 
 
 class HistoryPageData(BaseModel):
@@ -98,6 +100,7 @@ class TaskData(BaseModel):
     history_warning: str | None = None
     machine_status: str | None = None
     review_status: str = "pending"
+    delivery_status: str = "not_ready"
     phase: str | None = None
     thread_id: str | None = None
     turn_count: int = 0
@@ -121,6 +124,10 @@ class TaskData(BaseModel):
     diff_redaction_count: int = 0
     review: dict[str, Any] | None = None
     review_history: list[dict[str, Any]] = Field(default_factory=list)
+    context: dict[str, Any] = Field(default_factory=dict)
+    evaluations: dict[str, Any] = Field(default_factory=dict)
+    commit: dict[str, Any] = Field(default_factory=dict)
+    archive: dict[str, Any] = Field(default_factory=dict)
     queue_id: str | None = None
     sequence: int | None = None
     rerun_of: str | None = None
@@ -138,6 +145,7 @@ class QueueSubtaskData(BaseModel):
     status: str
     machine_status: str | None = None
     review_status: str
+    delivery_status: str = "not_ready"
     thread_id: str | None = None
     last_error_summary: str = ""
     updated_at: str
@@ -154,6 +162,7 @@ class QueueData(BaseModel):
     current_task_id: str | None = None
     cumulative_diff_sha256: str = ""
     last_error_summary: str = ""
+    delivery_status: str = "not_ready"
     subtasks: list[QueueSubtaskData]
     started_at: str
     updated_at: str

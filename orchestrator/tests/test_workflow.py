@@ -11,6 +11,7 @@ import pytest
 
 from orchestrator.codex_loop.audit import AuditRecorder
 from orchestrator.codex_loop.codex_client import CodexRunResult
+from orchestrator.codex_loop.context import ContextSnapshot, merge_context_snapshots
 from orchestrator.codex_loop.models import (
     CommandResult,
     InfrastructureError,
@@ -20,7 +21,7 @@ from orchestrator.codex_loop.models import (
     TaskSpec,
     ValidationRound,
 )
-from orchestrator.codex_loop.state import ActiveRunError, StateStore
+from orchestrator.codex_loop.state import ActiveRunError, StateStore, _atomic_write_json
 from orchestrator.codex_loop.workflow import OrchestrationWorkflow
 from orchestrator.codex_loop.workspace import WorkspaceManager
 
@@ -178,6 +179,102 @@ class FakeValidator:
         )
 
 
+class EventClient:
+    def __init__(self) -> None:
+        self.event_sink: Any | None = None
+
+
+class FakeContextAssembler:
+    def __init__(self) -> None:
+        self.event_sink: Any | None = None
+        self.knowledge = type("Knowledge", (), {"client": EventClient()})()
+        self.skills = type("Skills", (), {"client": EventClient()})()
+        self.calls: list[tuple[str, str]] = []
+
+    def assemble(
+        self,
+        *,
+        path: str | Path,
+        stage: str,
+        query: str,
+        actor: str,
+        **_kwargs: Any,
+    ) -> ContextSnapshot:
+        target = Path(path)
+        self.calls.append((stage, target.name))
+        if target.is_file():
+            snapshot = ContextSnapshot.from_dict(
+                json.loads(target.read_text(encoding="utf-8"))
+            )
+            snapshot.verify_hash()
+            return snapshot
+        snapshot = merge_context_snapshots(
+            stage,
+            ContextSnapshot(stage=stage, query=query, actor=actor),
+        )
+        _atomic_write_json(target, snapshot.to_dict())
+        if self.event_sink is not None:
+            self.event_sink(
+                "context.assembled",
+                {
+                    "stage": stage,
+                    "snapshot_sha256": snapshot.snapshot_sha256,
+                },
+            )
+        return snapshot
+
+
+class FakeEvaluationCoordinator:
+    def __init__(self, outputs: list[dict[str, Any]]) -> None:
+        self.outputs = deque(outputs)
+        self.event_sink: Any | None = None
+        self.context_hashes: list[str] = []
+
+    def evaluate(
+        self,
+        *,
+        context: ContextSnapshot,
+        validation_round: int,
+        artifact_root: str | Path,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        self.context_hashes.append(context.snapshot_sha256)
+        aggregate = {
+            "schema_version": 1,
+            "validation_round": validation_round,
+            "syntax": {"status": "pass"},
+            "logic": {"status": "pass"},
+            "specification": {"status": "pass"},
+            "architecture": {"status": "not_evaluated"},
+            "requires_repair": False,
+            "blocking_findings": [],
+            "warnings": [],
+            "information": [],
+            "context_sha256": context.snapshot_sha256,
+            **self.outputs.popleft(),
+        }
+        root = Path(artifact_root)
+        round_root = root / f"round-{validation_round:02d}"
+        _atomic_write_json(round_root / "spec.json", aggregate["specification"])
+        _atomic_write_json(
+            round_root / "architecture.json", aggregate["architecture"]
+        )
+        _atomic_write_json(round_root / "aggregate.json", aggregate)
+        _atomic_write_json(root / "spec.json", aggregate["specification"])
+        _atomic_write_json(root / "architecture.json", aggregate["architecture"])
+        _atomic_write_json(root / "aggregate.json", aggregate)
+        if self.event_sink is not None:
+            self.event_sink(
+                "evaluation.completed",
+                {
+                    "validation_round": validation_round,
+                    "requires_repair": aggregate["requires_repair"],
+                    "context_sha256": context.snapshot_sha256,
+                },
+            )
+        return aggregate
+
+
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     subprocess.run(
@@ -311,6 +408,110 @@ def test_first_turn_success_creates_thread_state_logs_and_report(repo: Path) -> 
     saved_state = StateStore(repo).load_state("workflow-test")
     assert saved_state.protected_test_paths == ["backend/tests/test_before.py"]
     assert not (repo / ".codex-orchestrator/active.lock").exists()
+
+
+def test_frozen_context_and_four_layer_result_flow_through_workflow(
+    repo: Path,
+) -> None:
+    client = FakeCodexClient()
+    validator = FakeValidator([(True, [0, 0, 0])])
+    contexts = FakeContextAssembler()
+    evaluator = FakeEvaluationCoordinator([{}])
+    workflow = OrchestrationWorkflow(
+        repo,
+        client_factory=lambda _root: client,
+        validator_factory=lambda _root, _baseline: validator,
+        context_assembler=contexts,  # type: ignore[arg-type]
+        evaluation_coordinator=evaluator,  # type: ignore[arg-type]
+        knowledge_actor_id="zhangsan",
+    )
+
+    result = workflow.start(task())
+
+    assert result.status is RunStatus.SUCCESS
+    run_dir = repo / ".codex-orchestrator/runs/workflow-test"
+    generation = ContextSnapshot.from_dict(
+        json.loads(
+            (run_dir / "context/generation.json").read_text(encoding="utf-8")
+        )
+    )
+    evaluation = ContextSnapshot.from_dict(
+        json.loads(
+            (run_dir / "context/evaluation.json").read_text(encoding="utf-8")
+        )
+    )
+    generation.verify_hash()
+    evaluation.verify_hash()
+    assert generation.snapshot_sha256 in client.prompts[0]
+    assert evaluator.context_hashes == [evaluation.snapshot_sha256]
+    assert [stage for stage, _name in contexts.calls] == [
+        "generation",
+        "spec_evaluation",
+        "architecture_evaluation",
+    ]
+    aggregate = json.loads(
+        (run_dir / "evaluations/aggregate.json").read_text(encoding="utf-8")
+    )
+    assert aggregate["syntax"]["status"] == "pass"
+    assert aggregate["logic"]["status"] == "pass"
+    assert aggregate["architecture"]["status"] == "not_evaluated"
+
+
+def test_blocking_evaluation_reuses_generator_thread_and_frozen_context(
+    repo: Path,
+) -> None:
+    client = FakeCodexClient()
+    validator = FakeValidator(
+        [(True, [0, 0, 0]), (True, [0, 0, 0])]
+    )
+    contexts = FakeContextAssembler()
+    evaluator = FakeEvaluationCoordinator(
+        [
+            {
+                "specification": {"status": "fail"},
+                "requires_repair": True,
+                "blocking_findings": [
+                    {
+                        "layer": "specification",
+                        "acceptance_id": "AC-001",
+                        "evidence": "backend/tests/test_before.py",
+                    }
+                ],
+            },
+            {},
+        ]
+    )
+    workflow = OrchestrationWorkflow(
+        repo,
+        client_factory=lambda _root: client,
+        validator_factory=lambda _root, _baseline: validator,
+        context_assembler=contexts,  # type: ignore[arg-type]
+        evaluation_coordinator=evaluator,  # type: ignore[arg-type]
+        knowledge_actor_id="zhangsan",
+    )
+
+    result = workflow.start(task())
+
+    assert result.status is RunStatus.SUCCESS
+    assert result.failure_count == 1
+    assert result.turn_count == 2
+    assert client.start_calls == 1
+    assert client.resume_calls == []
+    assert "# 独立评估发现" in client.prompts[1]
+    generation = ContextSnapshot.from_dict(
+        json.loads(
+            (
+                repo
+                / ".codex-orchestrator/runs/workflow-test/context/generation.json"
+            ).read_text(encoding="utf-8")
+        )
+    )
+    assert all(
+        generation.snapshot_sha256 in prompt for prompt in client.prompts
+    )
+    assert len(evaluator.context_hashes) == 2
+    assert len(set(evaluator.context_hashes)) == 1
+    assert [stage for stage, _name in contexts.calls].count("generation") == 1
 
 
 def test_effective_permissions_are_verified_before_prompt(repo: Path) -> None:

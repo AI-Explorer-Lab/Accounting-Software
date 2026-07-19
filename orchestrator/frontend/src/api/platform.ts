@@ -1,6 +1,8 @@
 import { apiRequest, apiText, PROJECT_STORAGE_KEY } from "./http";
 import type {
   EventPageData,
+  HarnessCapabilitiesData,
+  HarnessMetricsData,
   HistoryPageData,
   LogData,
   NotificationData,
@@ -29,6 +31,14 @@ function queryString(values: Record<string, string | number | undefined>): strin
 
 export function getProjects(): Promise<ProjectData[]> {
   return apiRequest<ProjectData[]>("/api/projects");
+}
+
+export function getCapabilities(): Promise<HarnessCapabilitiesData> {
+  return apiRequest<HarnessCapabilitiesData>("/api/capabilities");
+}
+
+export function getMetrics(): Promise<HarnessMetricsData> {
+  return apiRequest<HarnessMetricsData>("/api/metrics");
 }
 
 export function getHistory(query: HistoryQuery = {}): Promise<HistoryPageData> {

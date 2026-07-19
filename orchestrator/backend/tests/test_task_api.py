@@ -13,6 +13,8 @@ class FakeTaskService:
         self.resumed: str | None = None
         self.controlled: tuple[str, str] | None = None
         self.rerun: str | None = None
+        self.reviewed_commit_subject: str | None = None
+        self.retried: str | None = None
 
     def start_task(
         self,
@@ -52,7 +54,9 @@ class FakeTaskService:
         reviewer: str,
         comment: str,
         reviewed_diff_sha256: str,
+        commit_subject: str = "",
     ) -> TaskSnapshot:
+        self.reviewed_commit_subject = commit_subject
         snapshot = _snapshot(task_id=task_id, status="success")
         values = snapshot.to_dict()
         values.update(
@@ -62,8 +66,21 @@ class FakeTaskService:
                 "reviewer": reviewer,
                 "comment": comment,
                 "reviewed_diff_sha256": reviewed_diff_sha256,
+                "commit_subject": commit_subject,
             },
         )
+        return TaskSnapshot(**values)
+
+    def retry_commit(self, task_id: str) -> TaskSnapshot:
+        self.retried = f"commit:{task_id}"
+        values = _snapshot(task_id=task_id, status="success").to_dict()
+        values["delivery_status"] = "committed"
+        return TaskSnapshot(**values)
+
+    def retry_archive(self, task_id: str) -> TaskSnapshot:
+        self.retried = f"archive:{task_id}"
+        values = _snapshot(task_id=task_id, status="success").to_dict()
+        values["delivery_status"] = "archived"
         return TaskSnapshot(**values)
 
 
@@ -165,9 +182,10 @@ def test_pause_cancel_and_rerun_endpoints() -> None:
     assert service.rerun == "task-9"
 
 
-def test_review_endpoint_returns_the_recorded_decision() -> None:
+def test_review_endpoint_binds_commit_subject_to_the_recorded_decision() -> None:
     sha = "a" * 64
-    with _client(FakeTaskService()) as client:
+    service = FakeTaskService()
+    with _client(service) as client:
         response = client.post(
             "/api/tasks/task-9/review",
             json={
@@ -175,12 +193,29 @@ def test_review_endpoint_returns_the_recorded_decision() -> None:
                 "reviewer": "Local Reviewer",
                 "comment": "Checked.",
                 "reviewed_diff_sha256": sha,
+                "commit_subject": "add filtering",
             },
         )
 
     assert response.status_code == 200
     assert response.json()["data"]["review_status"] == "approved"
     assert response.json()["data"]["review"]["reviewed_diff_sha256"] == sha
+    assert response.json()["data"]["review"]["commit_subject"] == "add filtering"
+    assert service.reviewed_commit_subject == "add filtering"
+
+
+def test_delivery_and_archive_retry_endpoints_are_separate() -> None:
+    service = FakeTaskService()
+    with _client(service) as client:
+        committed = client.post("/api/tasks/task-9/delivery/retry")
+        assert service.retried == "commit:task-9"
+        archived = client.post("/api/tasks/task-9/archive/retry")
+
+    assert committed.status_code == 202
+    assert committed.json()["data"]["delivery_status"] == "committed"
+    assert archived.status_code == 202
+    assert archived.json()["data"]["delivery_status"] == "archived"
+    assert service.retried == "archive:task-9"
 
 
 def test_conflict_is_returned_as_structured_409() -> None:

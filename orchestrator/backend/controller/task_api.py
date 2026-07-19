@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request, status
 from fastapi.responses import PlainTextResponse
+from starlette.concurrency import run_in_threadpool
 
 from ..domain.req import ReviewRequest, TaskCreateRequest
 from ..domain.res import ApiResponse, TaskData
@@ -97,11 +98,41 @@ async def review_task(
     payload: ReviewRequest,
     request: Request,
 ) -> ApiResponse[TaskData]:
-    snapshot = _service(request).review_task(
+    arguments = {
+        "decision": payload.decision,
+        "reviewer": payload.reviewer,
+        "comment": payload.comment,
+        "reviewed_diff_sha256": payload.reviewed_diff_sha256,
+    }
+    if payload.commit_subject:
+        arguments["commit_subject"] = payload.commit_subject
+    snapshot = await run_in_threadpool(
+        _service(request).review_task,
         task_id,
-        decision=payload.decision,
-        reviewer=payload.reviewer,
-        comment=payload.comment,
-        reviewed_diff_sha256=payload.reviewed_diff_sha256,
+        **arguments,
+    )
+    return _response(request, snapshot)
+
+
+@router.post(
+    "/{task_id}/delivery/retry",
+    response_model=ApiResponse[TaskData],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_delivery(task_id: str, request: Request) -> ApiResponse[TaskData]:
+    snapshot = await run_in_threadpool(
+        _service(request).retry_commit, task_id
+    )
+    return _response(request, snapshot)
+
+
+@router.post(
+    "/{task_id}/archive/retry",
+    response_model=ApiResponse[TaskData],
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_archive(task_id: str, request: Request) -> ApiResponse[TaskData]:
+    snapshot = await run_in_threadpool(
+        _service(request).retry_archive, task_id
     )
     return _response(request, snapshot)

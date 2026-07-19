@@ -25,6 +25,16 @@ const reviewLabels: Record<TaskData["review_status"], string> = {
   rejected: "已驳回",
   unavailable: "历史信息缺失",
 };
+const deliveryLabels: Record<TaskData["delivery_status"], string> = {
+  not_ready: "未进入交付",
+  commit_pending: "等待 commit",
+  committing: "正在 commit",
+  committed: "已 commit",
+  archive_pending: "等待归档",
+  archived: "已归档",
+  failed: "交付失败",
+  unavailable: "历史信息缺失",
+};
 
 const statusLabel = computed(() => labels[props.task.status]);
 const reviewLabel = computed(() => reviewLabels[props.task.review_status]);
@@ -79,6 +89,10 @@ function formatTime(value: string | null): string {
         <div><dt>任务编号</dt><dd class="copy-value"><span>{{ task.task_id }}</span><CopyButton :value="task.task_id" label="任务编号" /></dd></div>
         <div><dt>更新时间</dt><dd>{{ formatTime(task.updated_at) }}</dd></div>
         <div><dt>人工审核</dt><dd>{{ reviewLabel }}</dd></div>
+        <div><dt>交付状态</dt><dd>{{ deliveryLabels[task.delivery_status] }}</dd></div>
+        <div><dt>Context 快照</dt><dd>{{ Object.keys(task.context).length ? "已冻结" : "该记录不具备" }}</dd></div>
+        <div><dt>四层评估</dt><dd>{{ Object.keys(task.evaluations).length ? "已有产物" : "该记录不具备" }}</dd></div>
+        <div v-if="task.commit.commit_sha"><dt>Commit</dt><dd class="copy-value"><span>{{ task.commit.commit_sha }}</span><CopyButton :value="String(task.commit.commit_sha)" label="commit" /></dd></div>
         <div><dt>Thread</dt><dd class="copy-value"><span>{{ task.thread_id || "尚未创建" }}</span><CopyButton v-if="task.thread_id" :value="task.thread_id" label="Thread" /></dd></div>
         <div v-if="!task.legacy"><dt>任务分支</dt><dd>{{ task.workspace.task_branch || "—" }}</dd></div>
         <div v-if="!task.legacy"><dt>基线 commit</dt><dd class="copy-value"><span>{{ task.workspace.base_commit || "—" }}</span><CopyButton v-if="task.workspace.base_commit" :value="String(task.workspace.base_commit)" label="commit" /></dd></div>
@@ -94,6 +108,9 @@ function formatTime(value: string | null): string {
     </div>
     <div v-if="task.infrastructure_error" class="callout danger-callout">
       <strong>运行环境故障</strong><p>{{ task.infrastructure_error }}</p>
+    </div>
+    <div v-else-if="task.delivery_status === 'failed'" class="callout danger-callout">
+      <strong>自动交付需要处理</strong><p>{{ task.last_error_summary || "可从审核页重试 commit 或知识归档。" }}</p>
     </div>
     <div v-else-if="task.status === 'manual_review'" class="callout warning-callout">
       <strong>机器流程需要人工判断</strong>

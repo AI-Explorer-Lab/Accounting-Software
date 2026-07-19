@@ -47,7 +47,7 @@ ACCOUNT_PREFIX="$(
 ACCOUNT_PYTHON="${ACCOUNT_PREFIX}/bin/python"
 
 [[ -x "${ACCOUNT_PYTHON}" ]] || fail "account 环境中没有可执行的 Python。"
-"${ACCOUNT_PYTHON}" -c 'import dynaconf, fastapi, openai_codex, pydantic, uvicorn' \
+"${ACCOUNT_PYTHON}" -c 'import dynaconf, fastapi, mcp, openai_codex, pydantic, uvicorn' \
   >/dev/null 2>&1 \
   || fail "account 环境缺少依赖，请先安装 orchestrator/requirements.txt 和 orchestrator/backend/requirements.txt。"
 

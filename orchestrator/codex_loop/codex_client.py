@@ -62,6 +62,8 @@ class CodexClient:
         event_sink: Callable[[Any], None] | None = None,
         permission_denial_sink: Callable[[str, Mapping[str, Any]], None]
         | None = None,
+        read_only: bool = False,
+        base_instructions: str | None = None,
     ) -> None:
         self.repo_root = Path(repo_root or DEFAULT_REPO_ROOT).expanduser().resolve()
         self.runtime_path = Path(
@@ -70,6 +72,10 @@ class CodexClient:
         self.policy = policy
         self.event_sink = event_sink
         self.permission_denial_sink = permission_denial_sink
+        self.read_only = bool(read_only)
+        self.base_instructions = (
+            None if base_instructions is None else str(base_instructions)
+        )
         self._sdk: _SdkBindings | None = None
         self._codex_context: Any | None = None
         self._codex: Any | None = None
@@ -141,10 +147,15 @@ class CodexClient:
         assert self._sdk is not None
 
         try:
-            thread = self._codex.thread_start(
-                cwd=str(self.repo_root),
-                approval_mode=self._sdk.ApprovalMode.deny_all,
-            )
+            arguments: dict[str, Any] = {
+                "cwd": str(self.repo_root),
+                "approval_mode": self._sdk.ApprovalMode.deny_all,
+            }
+            if self.read_only:
+                arguments["sandbox"] = self._sdk.Sandbox.read_only
+            if self.base_instructions:
+                arguments["base_instructions"] = self.base_instructions
+            thread = self._codex.thread_start(**arguments)
         except Exception as exc:
             raise self._error("Unable to start a Codex thread", exc) from exc
 
@@ -161,17 +172,26 @@ class CodexClient:
         assert self._sdk is not None
 
         try:
-            thread = self._codex.thread_resume(
-                thread_id,
-                cwd=str(self.repo_root),
-                approval_mode=self._sdk.ApprovalMode.deny_all,
-            )
+            arguments = {
+                "cwd": str(self.repo_root),
+                "approval_mode": self._sdk.ApprovalMode.deny_all,
+            }
+            if self.read_only:
+                arguments["sandbox"] = self._sdk.Sandbox.read_only
+            if self.base_instructions:
+                arguments["base_instructions"] = self.base_instructions
+            thread = self._codex.thread_resume(thread_id, **arguments)
         except Exception as exc:
             raise self._error("Unable to resume the Codex thread", exc) from exc
 
         return self._select_thread(thread, "resumed")
 
-    def run(self, prompt: str) -> CodexRunResult:
+    def run(
+        self,
+        prompt: str,
+        *,
+        output_schema: Mapping[str, Any] | None = None,
+    ) -> CodexRunResult:
         """Run one turn on the active thread and require normal completion."""
 
         if not isinstance(prompt, str) or not prompt.strip():
@@ -181,11 +201,15 @@ class CodexClient:
 
         assert self._sdk is not None
         try:
-            handle = self._thread.turn(
-                prompt,
-                approval_mode=self._sdk.ApprovalMode.deny_all,
-                cwd=str(self.repo_root),
-            )
+            arguments: dict[str, Any] = {
+                "approval_mode": self._sdk.ApprovalMode.deny_all,
+                "cwd": str(self.repo_root),
+            }
+            if self.read_only:
+                arguments["sandbox"] = self._sdk.Sandbox.read_only
+            if output_schema is not None:
+                arguments["output_schema"] = dict(output_schema)
+            handle = self._thread.turn(prompt, **arguments)
             completed_turn: Any | None = None
             usage: dict[str, Any] | None = None
             visible_response: str | None = None
@@ -217,9 +241,11 @@ class CodexClient:
             status_name = getattr(status, "value", status)
             turn_error = getattr(completed_turn, "error", None)
             error_name = type(turn_error).__name__ if turn_error is not None else "none"
+            error_detail = _turn_error_detail(turn_error)
+            detail_suffix = f", detail={error_detail}" if error_detail else ""
             raise InfrastructureError(
                 "Codex turn did not complete "
-                f"(status={status_name!s}, error_type={error_name})"
+                f"(status={status_name!s}, error_type={error_name}{detail_suffix})"
             )
 
         for wrapped in getattr(completed_turn, "items", []) or []:
@@ -387,6 +413,20 @@ class CodexClient:
                     self._isolated_app_server_command()
                 )
                 config_values["cwd"] = str(self.repo_root)
+            elif self.read_only:
+                config_values["config_overrides"] = (
+                    'approval_policy="never"',
+                    'web_search="disabled"',
+                    "features.apps=false",
+                    "features.multi_agent=false",
+                    "features.remote_plugin=false",
+                    "features.memories=false",
+                    "features.skill_mcp_dependency_install=false",
+                    "mcp_servers={}",
+                    "apps._default.enabled=false",
+                    "apps._default.destructive_enabled=false",
+                    "apps._default.open_world_enabled=false",
+                )
             config = sdk.CodexConfig(**config_values)
             context = sdk.Codex(config)
             codex = context.__enter__()
@@ -592,6 +632,23 @@ def _model_dump(value: Any) -> Any:
             if not str(key).startswith("_")
         }
     return value
+
+
+def _turn_error_detail(value: Any) -> str:
+    """Keep a bounded, redacted SDK failure reason for recovery diagnostics."""
+
+    if value is None:
+        return ""
+    parts: list[str] = []
+    for name in ("message", "additional_details"):
+        raw = getattr(value, name, None)
+        if isinstance(raw, str) and raw.strip():
+            parts.append(raw.strip())
+    if not parts:
+        dumped = _model_dump(value)
+        if dumped not in (None, {}, ""):
+            parts.append(str(dumped))
+    return redact_sensitive_text("; ".join(parts)).strip()[:2_000]
 
 
 def _final_agent_response(turn: Any) -> str | None:

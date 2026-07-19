@@ -72,7 +72,7 @@ const pendingIds = computed(() =>
         <span class="queue-sequence">{{ subtask.sequence }}</span>
         <div class="queue-copy">
           <strong>{{ subtask.requirement }}</strong>
-          <small>{{ subtaskLabels[subtask.status] }} · {{ subtask.task_id }}</small>
+          <small>{{ subtaskLabels[subtask.status] }} · 交付 {{ subtask.delivery_status }} · {{ subtask.task_id }}</small>
         </div>
         <div v-if="subtask.status === 'pending'" class="row-actions">
           <button
@@ -98,6 +98,7 @@ const pendingIds = computed(() =>
         </div>
       </li>
     </ol>
+    <p class="identifier-copy">队列交付状态 <strong>{{ queue.delivery_status }}</strong></p>
     <div v-if="queue.last_error_summary" class="callout danger-callout">
       <strong>队列需要处理</strong><p>{{ queue.last_error_summary }}</p>
     </div>

@@ -103,6 +103,12 @@ def test_projects_history_events_logs_and_notifications_share_persisted_state(
             headers={"X-Project-ID": "accounting"},
             json={"in_app": False, "browser": False},
         )
+        capabilities = client.get(
+            "/api/capabilities", headers={"X-Project-ID": "accounting"}
+        )
+        metrics = client.get(
+            "/api/metrics", headers={"X-Project-ID": "accounting"}
+        )
 
     assert projects.status_code == 200
     assert projects.json()["data"][0]["project_id"] == "accounting"
@@ -127,6 +133,13 @@ def test_projects_history_events_logs_and_notifications_share_persisted_state(
         "email_configured": False,
         "webhook_configured": False,
     }
+    assert capabilities.json()["data"] == {
+        "status": "unavailable",
+        "project_id": "accounting",
+        "reason": "harness feature is disabled",
+    }
+    assert metrics.json()["data"]["project_id"] == "accounting"
+    assert metrics.json()["data"]["completed_tasks"] == 1
 
 
 def test_unknown_project_is_rejected_before_artifact_lookup(tmp_path: Path) -> None:

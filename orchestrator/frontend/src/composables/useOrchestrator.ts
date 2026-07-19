@@ -20,11 +20,14 @@ import {
   skipQueueSubtask,
 } from "../api/queues";
 import { getHealth } from "../api/health";
+import { confirmPlan, createPlan } from "../api/plans";
 import {
   eventStreamUrl,
+  getCapabilities,
   getEvents,
   getLog,
   getLogs,
+  getMetrics,
   getNotificationSettings,
   getNotifications,
   getProjects,
@@ -39,16 +42,22 @@ import {
   getTaskReport,
   pauseTask,
   rerunTask,
+  retryTaskArchive,
+  retryTaskCommit,
   resumeTask,
   submitTaskReview,
 } from "../api/tasks";
 import { ApiError, PROJECT_STORAGE_KEY } from "../api/http";
 import type {
   EventRecord,
+  HarnessCapabilitiesData,
+  HarnessMetricsData,
   HealthData,
   LogData,
   NotificationData,
   NotificationSettingsData,
+  PlanCreatePayload,
+  PlanDraft,
   ProjectData,
   QueueCreatePayload,
   QueueData,
@@ -147,10 +156,16 @@ export function createOrchestrator() {
     webhook_configured: false,
   });
   const health = ref<HealthData | null>(null);
+  const capabilities = ref<HarnessCapabilitiesData | null>(null);
+  const metrics = ref<HarnessMetricsData | null>(null);
+  const harnessError = ref("");
+  const plan = ref<PlanDraft | null>(null);
   const healthError = ref("");
   const checkingHealth = ref(false);
   const pageError = ref("");
   const submitting = ref(false);
+  const planning = ref(false);
+  const confirmingPlan = ref(false);
   const reviewing = ref(false);
   const controlling = ref(false);
   const initializing = ref(true);
@@ -409,7 +424,7 @@ export function createOrchestrator() {
     const changed = activeProjectId.value !== projectId;
     activeProjectId.value = projectId;
     writeStorage(PROJECT_STORAGE_KEY, projectId);
-    await refreshNotificationSettings();
+    await Promise.all([refreshNotificationSettings(), refreshHarnessStatus()]);
     if (!changed && !restore) return;
     resetRun();
     if (!restore) return;
@@ -435,7 +450,7 @@ export function createOrchestrator() {
         activeProjectId.value = selected;
         writeStorage(PROJECT_STORAGE_KEY, selected);
       }
-      await refreshNotificationSettings();
+      await Promise.all([refreshNotificationSettings(), refreshHarnessStatus()]);
       let stored = selected ? readStoredRuns()[selected] : undefined;
       if (!stored && selected) {
         const legacyKind = readStorage(LAST_KIND_STORAGE_KEY);
@@ -468,6 +483,59 @@ export function createOrchestrator() {
       healthError.value = messageFrom(error, "后端服务不可用。");
     } finally {
       checkingHealth.value = false;
+    }
+  }
+
+  async function refreshHarnessStatus(): Promise<void> {
+    try {
+      [capabilities.value, metrics.value] = await Promise.all([
+        getCapabilities(),
+        getMetrics(),
+      ]);
+      harnessError.value = "";
+    } catch (error) {
+      capabilities.value = null;
+      metrics.value = null;
+      harnessError.value = messageFrom(error, "Harness 能力状态读取失败。");
+    }
+  }
+
+  async function generatePlan(payload: PlanCreatePayload): Promise<PlanDraft | null> {
+    planning.value = true;
+    pageError.value = "";
+    plan.value = null;
+    try {
+      plan.value = await createPlan(payload);
+      return plan.value;
+    } catch (error) {
+      recordError(error, "自动规划草稿生成失败；尚未创建任务或工作区。");
+      return null;
+    } finally {
+      planning.value = false;
+    }
+  }
+
+  async function confirmCurrentPlan(
+    reviewer: string,
+    editedDraft: PlanDraft,
+  ): Promise<boolean> {
+    if (!plan.value || plan.value.plan_id !== editedDraft.plan_id) return false;
+    confirmingPlan.value = true;
+    pageError.value = "";
+    try {
+      const result = await confirmPlan(plan.value.plan_id, reviewer, editedDraft);
+      plan.value = null;
+      const target = result.target;
+      const targetId = result.target_kind === "task"
+        ? (target as TaskData).task_id
+        : (target as QueueData).queue_id;
+      await activateRun(result.target_kind, targetId);
+      return true;
+    } catch (error) {
+      recordError(error, "Plan 确认失败；未启动新的执行。草稿仍可继续修改。");
+      return false;
+    } finally {
+      confirmingPlan.value = false;
     }
   }
 
@@ -559,6 +627,7 @@ export function createOrchestrator() {
     decision: ReviewDecision;
     reviewer: string;
     comment: string;
+    commit_subject: string;
   }): Promise<boolean> {
     if (!task.value) return false;
     reviewing.value = true;
@@ -577,6 +646,23 @@ export function createOrchestrator() {
       return false;
     } finally {
       reviewing.value = false;
+    }
+  }
+
+  async function retryDelivery(kind: "commit" | "archive"): Promise<void> {
+    if (!task.value) return;
+    controlling.value = true;
+    pageError.value = "";
+    try {
+      task.value = kind === "commit"
+        ? await retryTaskCommit(task.value.task_id)
+        : await retryTaskArchive(task.value.task_id);
+      if (queue.value) await refreshQueue(queue.value.queue_id);
+      else await loadTaskArtifacts(task.value.task_id);
+    } catch (error) {
+      recordError(error, kind === "commit" ? "Commit 重试失败。" : "知识归档重试失败。");
+    } finally {
+      controlling.value = false;
     }
   }
 
@@ -714,12 +800,18 @@ export function createOrchestrator() {
     notifications,
     notificationSettings,
     health,
+    capabilities,
+    metrics,
+    harnessError,
+    plan,
     healthError,
     checkingHealth,
     connectionState,
     unreadCount,
     pageError,
     submitting,
+    planning,
+    confirmingPlan,
     reviewing,
     controlling,
     initializing,
@@ -731,6 +823,7 @@ export function createOrchestrator() {
     needsReview,
     initialize,
     checkHealth,
+    refreshHarnessStatus,
     dispose,
     resetRun,
     activateRun,
@@ -739,8 +832,11 @@ export function createOrchestrator() {
     refreshEventsAndLogs,
     submitTask,
     submitQueue,
+    generatePlan,
+    confirmCurrentPlan,
     runControl,
     submitReview,
+    retryDelivery,
     skipSubtask,
     movePendingSubtask,
     selectLog,

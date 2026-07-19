@@ -15,6 +15,7 @@ class TaskSnapshot:
     history_warning: str | None = None
     machine_status: str | None = None
     review_status: str = "pending"
+    delivery_status: str = "not_ready"
     phase: str | None = None
     thread_id: str | None = None
     turn_count: int = 0
@@ -38,6 +39,10 @@ class TaskSnapshot:
     diff_redaction_count: int = 0
     review: dict[str, Any] | None = None
     review_history: list[dict[str, Any]] = field(default_factory=list)
+    context: dict[str, Any] = field(default_factory=dict)
+    evaluations: dict[str, Any] = field(default_factory=dict)
+    commit: dict[str, Any] = field(default_factory=dict)
+    archive: dict[str, Any] = field(default_factory=dict)
     queue_id: str | None = None
     sequence: int | None = None
     rerun_of: str | None = None
@@ -53,6 +58,7 @@ class TaskSnapshot:
             "history_warning": self.history_warning,
             "machine_status": self.machine_status or self.status,
             "review_status": self.review_status,
+            "delivery_status": self.delivery_status,
             "phase": self.phase,
             "thread_id": self.thread_id,
             "turn_count": self.turn_count,
@@ -76,6 +82,10 @@ class TaskSnapshot:
             "diff_redaction_count": self.diff_redaction_count,
             "review": None if self.review is None else dict(self.review),
             "review_history": list(self.review_history),
+            "context": dict(self.context),
+            "evaluations": dict(self.evaluations),
+            "commit": dict(self.commit),
+            "archive": dict(self.archive),
             "queue_id": self.queue_id,
             "sequence": self.sequence,
             "rerun_of": self.rerun_of,
@@ -94,6 +104,7 @@ class QueueSubtaskSnapshot:
     thread_id: str | None
     last_error_summary: str
     updated_at: str
+    delivery_status: str = "not_ready"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -104,6 +115,7 @@ class QueueSubtaskSnapshot:
             "status": self.status,
             "machine_status": self.machine_status,
             "review_status": self.review_status,
+            "delivery_status": self.delivery_status,
             "thread_id": self.thread_id,
             "last_error_summary": self.last_error_summary,
             "updated_at": self.updated_at,
@@ -124,6 +136,7 @@ class QueueSnapshot:
     started_at: str
     updated_at: str
     finished_at: str | None
+    delivery_status: str = "not_ready"
     report_url: str | None = None
     diff_url: str | None = None
     rerun_of: str | None = None
@@ -138,6 +151,7 @@ class QueueSnapshot:
             "current_task_id": self.current_task_id,
             "cumulative_diff_sha256": self.cumulative_diff_sha256,
             "last_error_summary": self.last_error_summary,
+            "delivery_status": self.delivery_status,
             "subtasks": [task.to_dict() for task in self.subtasks],
             "started_at": self.started_at,
             "updated_at": self.updated_at,

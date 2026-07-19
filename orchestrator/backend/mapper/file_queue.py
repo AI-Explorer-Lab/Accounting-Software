@@ -62,11 +62,23 @@ class FileQueueMapper:
                         else child.machine_status.value
                     ),
                     review_status=child.review_status.value,
+                    delivery_status=child.delivery_status.value,
                     thread_id=child.thread_id,
                     last_error_summary=child.last_error_summary,
                     updated_at=child.updated_at,
                 )
             )
+        delivery_status = "not_ready"
+        if state.current_task_id is not None:
+            delivery_status = state.task(state.current_task_id).delivery_status.value
+        elif state.subtasks:
+            statuses = [item.delivery_status.value for item in state.subtasks]
+            if all(value == "archived" for value in statuses):
+                delivery_status = "archived"
+            elif any(value == "failed" for value in statuses):
+                delivery_status = "failed"
+            elif any(value in {"committed", "archive_pending", "archived"} for value in statuses):
+                delivery_status = "committed"
         return QueueSnapshot(
             queue_id=queue_id,
             name=spec.name,
@@ -76,6 +88,7 @@ class FileQueueMapper:
             current_task_id=state.current_task_id,
             cumulative_diff_sha256=state.cumulative_diff_sha256,
             last_error_summary=state.last_error_summary,
+            delivery_status=delivery_status,
             subtasks=subtasks,
             started_at=state.started_at,
             updated_at=state.updated_at,

@@ -246,6 +246,16 @@ class AuditRecorder:
         paths.update(self._untracked_paths())
         return sorted(paths)
 
+    def current_diff_text(self) -> str:
+        """Return the current complete diff for a bounded evaluator excerpt."""
+
+        return self._complete_diff().decode("utf-8", errors="replace")
+
+    def current_changed_files(self) -> list[dict[str, Any]]:
+        """Return current file metadata without persisting final artifacts."""
+
+        return self._changed_files()
+
     def has_event(
         self,
         event_type: str,

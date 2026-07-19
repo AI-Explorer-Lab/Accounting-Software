@@ -5,6 +5,7 @@ import json
 
 from fastapi import APIRouter, Header, Query, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from ..domain.res import (
     ApiResponse,
@@ -43,6 +44,30 @@ def _project_id(
 @router.get("/projects", response_model=ApiResponse[list[ProjectData]])
 async def list_projects(request: Request) -> ApiResponse[list[ProjectData]]:
     return ApiResponse(data=_service(request).projects())
+
+
+@router.get("/capabilities", response_model=ApiResponse[dict])
+async def capabilities(
+    request: Request,
+    project_id: str | None = None,
+    x_project_id: str | None = Header(default=None),
+) -> ApiResponse[dict]:
+    service = _service(request)
+    resolved = _project_id(service, x_project_id, project_id)
+    return ApiResponse(
+        data=await run_in_threadpool(service.capabilities, resolved)
+    )
+
+
+@router.get("/metrics", response_model=ApiResponse[dict])
+async def metrics(
+    request: Request,
+    project_id: str | None = None,
+    x_project_id: str | None = Header(default=None),
+) -> ApiResponse[dict]:
+    service = _service(request)
+    resolved = _project_id(service, x_project_id, project_id)
+    return ApiResponse(data=service.metrics(resolved))
 
 
 @router.get("/history", response_model=ApiResponse[HistoryPageData])

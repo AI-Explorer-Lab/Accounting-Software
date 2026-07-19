@@ -18,6 +18,15 @@ export type ReviewStatus =
 
 export type ReviewDecision = Exclude<ReviewStatus, "pending" | "unavailable">;
 export type RunKind = "task" | "queue";
+export type DeliveryStatus =
+  | "not_ready"
+  | "commit_pending"
+  | "committing"
+  | "committed"
+  | "archive_pending"
+  | "archived"
+  | "failed"
+  | "unavailable";
 
 export interface TaskCreatePayload {
   requirement: string;
@@ -29,6 +38,41 @@ export interface ReviewPayload {
   reviewer: string;
   comment: string;
   reviewed_diff_sha256: string;
+  commit_subject: string;
+}
+
+export interface PlanCreatePayload extends TaskCreatePayload {
+  name: string;
+}
+
+export interface PlannedSubtask {
+  sequence: number;
+  title: string;
+  requirement_slice: string;
+  source_acceptance_ids: string[];
+}
+
+export interface PlanDraft {
+  schema_version: number;
+  plan_id: string;
+  name: string;
+  source_requirement_sha256: string;
+  context_sha256: string;
+  acceptance_criteria: Record<string, string>;
+  status: "ready" | "manual_input_required";
+  execution_mode: "single" | "queue";
+  subtasks: PlannedSubtask[];
+  unassigned_acceptance_ids: string[];
+  warnings: string[];
+  planner_thread_id: string;
+  created_at: string;
+}
+
+export interface PlanConfirmationData {
+  plan_id: string;
+  target_kind: RunKind;
+  target: TaskData | QueueData;
+  confirmation: Record<string, unknown>;
 }
 
 export interface CommandSummary {
@@ -63,6 +107,7 @@ export interface TaskData {
   history_warning: string | null;
   machine_status: TaskStatus | null;
   review_status: ReviewStatus;
+  delivery_status: DeliveryStatus;
   phase: string | null;
   thread_id: string | null;
   turn_count: number;
@@ -86,6 +131,10 @@ export interface TaskData {
   diff_redaction_count: number;
   review: Record<string, unknown> | null;
   review_history: Array<Record<string, unknown>>;
+  context: Record<string, unknown>;
+  evaluations: Record<string, unknown>;
+  commit: Record<string, unknown>;
+  archive: Record<string, unknown>;
   queue_id: string | null;
   sequence: number | null;
   rerun_of: string | null;
@@ -129,6 +178,7 @@ export interface QueueSubtaskData extends QueueSubtaskCreatePayload {
   status: QueueSubtaskStatus;
   machine_status: TaskStatus | null;
   review_status: ReviewStatus;
+  delivery_status: DeliveryStatus;
   thread_id: string | null;
   last_error_summary: string;
   updated_at: string;
@@ -143,6 +193,7 @@ export interface QueueData {
   current_task_id: string | null;
   cumulative_diff_sha256: string;
   last_error_summary: string;
+  delivery_status: DeliveryStatus;
   subtasks: QueueSubtaskData[];
   started_at: string;
   updated_at: string;
@@ -158,6 +209,7 @@ export interface ProjectData {
   repo_root: string;
   is_default: boolean;
   active_identifier: string | null;
+  knowledge_actor_id: string;
 }
 
 export interface HistoryItemData {
@@ -172,6 +224,7 @@ export interface HistoryItemData {
   updated_at: string;
   finished_at: string | null;
   current_task_id: string | null;
+  delivery_status: DeliveryStatus | null;
 }
 
 export interface HistoryPageData {
@@ -229,6 +282,33 @@ export interface HealthData {
   status: string;
   environment: string;
   version: string;
+}
+
+export interface HarnessCapabilitiesData {
+  status: "healthy" | "unavailable" | string;
+  project_id: string;
+  reason?: string;
+  knowledge_base_path?: string;
+  mcp_registry?: string;
+  mcp_read?: Record<string, unknown>;
+  mcp_archive?: Record<string, unknown>;
+  skill_count?: number;
+  archive_backlog?: number;
+  knowledge_actor_id?: string;
+  checked_at?: string;
+}
+
+export interface HarnessMetricsData {
+  project_id: string;
+  task_success_rate: number | null;
+  completed_tasks: number;
+  layer_failure_counts: Record<string, number>;
+  repair_rounds: number;
+  knowledge_hit_rate: number | null;
+  planned_tasks: number;
+  planner_manual_edit_count: number;
+  commit_success_rate: number | null;
+  archive_backlog: number;
 }
 
 export interface ApiResponse<T> {

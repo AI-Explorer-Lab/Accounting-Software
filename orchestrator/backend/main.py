@@ -16,6 +16,7 @@ from .config.config import (
 from .constant.values import API_PREFIX, APP_NAME, APP_VERSION
 from .controller.health_api import router as health_router
 from .controller.platform_api import router as platform_router
+from .controller.plan_api import router as plan_router
 from .controller.queue_api import router as queue_router
 from .controller.task_api import router as task_router
 from .exceptions.exception_handler import register_exception_handlers
@@ -102,6 +103,7 @@ def create_app(
     app.include_router(platform_router, prefix=API_PREFIX)
     app.include_router(task_router, prefix=API_PREFIX)
     app.include_router(queue_router, prefix=API_PREFIX)
+    app.include_router(plan_router, prefix=API_PREFIX)
     return app
 
 
