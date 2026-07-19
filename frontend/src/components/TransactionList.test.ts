@@ -13,19 +13,17 @@ vi.mock('../api/transactions', () => ({
 const mockedDeleteTransaction = vi.mocked(deleteTransaction)
 const mockedListTransactions = vi.mocked(listTransactions)
 
-const pageResponse = (total = 1) => ({
+const pageResponse = (total = 1, amounts = ['88.00']) => ({
   success: true,
   data: {
-    items: [
-      {
-        id: 7,
-        amount: '88.00',
-        category: '餐饮',
-        description: '团队晚餐',
-        transaction_date: '2026-07-14',
-        transaction_type: 'expense' as const,
-      },
-    ],
+    items: amounts.map((amount, index) => ({
+      id: 7 + index,
+      amount,
+      category: '餐饮',
+      description: '团队晚餐',
+      transaction_date: '2026-07-14',
+      transaction_type: 'expense' as const,
+    })),
     total,
     page: 1,
     page_size: 10,
@@ -58,6 +56,15 @@ describe('TransactionList', () => {
     expect(wrapper.text()).toContain('餐饮')
     expect(wrapper.text()).toContain('¥88.00')
     expect(wrapper.text()).toContain('团队晚餐')
+  })
+
+  it('formats all displayed amounts with zh-CN grouping and two decimal places', async () => {
+    mockedListTransactions.mockResolvedValue(pageResponse(3, ['1234.5', '88', '19.90']))
+    const wrapper = mount(TransactionList, { props: { refreshKey: 0 } })
+    await flushPromises()
+
+    const displayedAmounts = wrapper.findAll('td.amount').map((cell) => cell.text())
+    expect(displayedAmounts).toEqual(['¥1,234.50', '¥88.00', '¥19.90'])
   })
 
   it('reloads when a transaction is created', async () => {

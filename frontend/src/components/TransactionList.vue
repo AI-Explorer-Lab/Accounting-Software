@@ -31,8 +31,16 @@ const loading = ref(false)
 const deletingId = ref<number | null>(null)
 const errorMessage = ref('')
 const feedbackMessage = ref('')
+const amountFormatter = new Intl.NumberFormat('zh-CN', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
+
+function formatAmount(amount: string) {
+  return `¥${amountFormatter.format(Number(amount))}`
+}
 
 async function loadTransactions() {
   loading.value = true
@@ -201,7 +209,7 @@ watch(() => props.refreshKey, loadTransactions)
                 {{ transaction.transaction_type === 'income' ? '收入' : '支出' }}
               </span>
             </td>
-            <td class="amount">¥{{ transaction.amount }}</td>
+            <td class="amount">{{ formatAmount(transaction.amount) }}</td>
             <td>{{ transaction.category }}</td>
             <td>{{ transaction.transaction_date }}</td>
             <td class="description">{{ transaction.description || '—' }}</td>
