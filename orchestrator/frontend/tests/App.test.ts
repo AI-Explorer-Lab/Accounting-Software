@@ -7,6 +7,7 @@ const taskApi = vi.hoisted(() => ({
   getTask: vi.fn(),
   getTaskDiff: vi.fn(),
   getTaskReport: vi.fn(),
+  openTaskInVSCode: vi.fn(),
   submitTaskReview: vi.fn(),
   retryTaskCommit: vi.fn(),
   retryTaskArchive: vi.fn(),
@@ -291,7 +292,9 @@ describe("App workbench", () => {
   it("confirms an immutable review bound to the displayed diff", async () => {
     localStorage.setItem("codex-orchestrator:last-task-id", "task-1");
     taskApi.getTask.mockResolvedValue(task("success"));
-    taskApi.submitTaskReview.mockResolvedValue(task("success", { review_status: "approved", review: { decision: "approved", reviewer: "Local Reviewer", comment: "Checked.", reviewed_diff_sha256: "b".repeat(64) } }));
+    const approved = task("success", { review_status: "approved", delivery_status: "archived", commit: { status: "committed", commit_sha: "c".repeat(40) }, review: { decision: "approved", reviewer: "Local Reviewer", comment: "Checked.", reviewed_diff_sha256: "b".repeat(64) } });
+    taskApi.submitTaskReview.mockResolvedValue(approved);
+    taskApi.openTaskInVSCode.mockResolvedValue(approved);
     const { wrapper } = await mountAt("/review");
 
     await wrapper.get('[data-test="reviewer"]').setValue("Local Reviewer");
@@ -303,7 +306,33 @@ describe("App workbench", () => {
     expect(taskApi.submitTaskReview).toHaveBeenCalledWith("task-1", {
       decision: "approved", reviewer: "Local Reviewer", comment: "Checked.", commit_subject: "Add filtering", reviewed_diff_sha256: "b".repeat(64),
     });
+    expect(taskApi.openTaskInVSCode).toHaveBeenCalledWith("task-1");
     expect(wrapper.get('[data-test="review-panel"]').text()).toContain("Local Reviewer");
+    wrapper.unmount();
+  });
+
+  it("keeps an approved review successful when VS Code cannot be opened", async () => {
+    localStorage.setItem("codex-orchestrator:last-task-id", "task-1");
+    taskApi.getTask.mockResolvedValue(task("success"));
+    const approved = task("success", {
+      review_status: "approved",
+      delivery_status: "archived",
+      commit: { status: "committed", commit_sha: "c".repeat(40) },
+      review: { decision: "approved", reviewer: "Local Reviewer" },
+    });
+    taskApi.submitTaskReview.mockResolvedValue(approved);
+    taskApi.openTaskInVSCode.mockRejectedValue(new Error("VS Code unavailable"));
+    const { wrapper } = await mountAt("/review");
+
+    await wrapper.get('[data-test="reviewer"]').setValue("Local Reviewer");
+    await wrapper.get('[data-test="approve"]').trigger("click");
+    await wrapper.get('[data-test="confirm-review"]').trigger("click");
+    await flushPromises();
+
+    expect(wrapper.get('[data-test="review-panel"]').text()).toContain("Local Reviewer");
+    expect(wrapper.get('[role="alert"]').text()).toContain(
+      "任务提交已成功，但无法在当前 VS Code 窗口打开任务分支",
+    );
     wrapper.unmount();
   });
 
@@ -337,6 +366,36 @@ describe("App workbench", () => {
 
     expect(wrapper.find('[data-test="reviewer"]').exists()).toBe(true);
     expect(wrapper.get('[data-test="review-panel"]').text()).toContain("第 1 次 · changes_requested");
+    wrapper.unmount();
+  });
+
+  it("does not replace the VS Code window after a queued subtask approval", async () => {
+    localStorage.setItem("codex-orchestrator:last-queue-id", "queue-1");
+    localStorage.setItem("codex-orchestrator:last-kind", "queue");
+    const queuedTask = task("success", {
+      task_id: "queue-1-task-01",
+      requirement: "新增交易",
+      acceptance_criteria: ["可以新增"],
+      queue_id: "queue-1",
+      sequence: 1,
+    });
+    queueApi.getQueue.mockResolvedValue(taskQueue("waiting_review"));
+    taskApi.getTask.mockResolvedValue(queuedTask);
+    taskApi.submitTaskReview.mockResolvedValue(task("success", {
+      ...queuedTask,
+      review_status: "approved",
+      delivery_status: "archived",
+      commit: { status: "committed", commit_sha: "c".repeat(40) },
+    }));
+    const { wrapper, router } = await mountAt("/review");
+
+    await wrapper.get('[data-test="reviewer"]').setValue("Queue Reviewer");
+    await wrapper.get('[data-test="approve"]').trigger("click");
+    await wrapper.get('[data-test="confirm-review"]').trigger("click");
+    await flushPromises();
+
+    expect(taskApi.openTaskInVSCode).not.toHaveBeenCalled();
+    expect(router.currentRoute.value.path).toBe("/monitor");
     wrapper.unmount();
   });
 

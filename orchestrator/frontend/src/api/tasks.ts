@@ -69,3 +69,10 @@ export function retryTaskArchive(taskId: string): Promise<TaskData> {
     { method: "POST" },
   );
 }
+
+export function openTaskInVSCode(taskId: string): Promise<TaskData> {
+  return apiRequest<TaskData>(
+    `/api/tasks/${encodeURIComponent(taskId)}/workspace/vscode`,
+    { method: "POST" },
+  );
+}

@@ -40,6 +40,7 @@ import {
   getTask,
   getTaskDiff,
   getTaskReport,
+  openTaskInVSCode,
   pauseTask,
   rerunTask,
   retryTaskArchive,
@@ -649,6 +650,19 @@ export function createOrchestrator() {
     }
   }
 
+  async function openCurrentTaskInVSCode(): Promise<boolean> {
+    if (!task.value || task.value.queue_id) return false;
+    try {
+      task.value = await openTaskInVSCode(task.value.task_id);
+      return true;
+    } catch (error) {
+      const detail = messageFrom(error, "未知原因");
+      pageError.value =
+        `任务提交已成功，但无法在当前 VS Code 窗口打开任务分支：${detail}`;
+      return false;
+    }
+  }
+
   async function retryDelivery(kind: "commit" | "archive"): Promise<void> {
     if (!task.value) return;
     controlling.value = true;
@@ -836,6 +850,7 @@ export function createOrchestrator() {
     confirmCurrentPlan,
     runControl,
     submitReview,
+    openCurrentTaskInVSCode,
     retryDelivery,
     skipSubtask,
     movePendingSubtask,
