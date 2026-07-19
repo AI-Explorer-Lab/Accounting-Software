@@ -44,6 +44,28 @@ async def test_list_transactions_normalizes_category(
 
 
 @pytest.mark.asyncio
+async def test_list_transactions_passes_inclusive_amount_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_kwargs = None
+
+    async def fake_list_records(_session, **kwargs):
+        nonlocal captured_kwargs
+        captured_kwargs = kwargs
+        return [], 0
+
+    monkeypatch.setattr(transaction_service, "list_records", fake_list_records)
+    await transaction_service.execute_list_transactions(
+        TransactionListRequest(min_amount=Decimal("10.00"), max_amount=Decimal("20.00")),
+        object(),
+    )
+
+    assert captured_kwargs is not None
+    assert captured_kwargs["min_amount"] == Decimal("10.00")
+    assert captured_kwargs["max_amount"] == Decimal("20.00")
+
+
+@pytest.mark.asyncio
 async def test_delete_transaction_raises_404_when_record_is_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

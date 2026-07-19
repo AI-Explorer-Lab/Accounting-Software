@@ -52,6 +52,8 @@ describe('TransactionList', () => {
       category: undefined,
       start_date: undefined,
       end_date: undefined,
+      min_amount: undefined,
+      max_amount: undefined,
     })
     expect(wrapper.text()).toContain('餐饮')
     expect(wrapper.text()).toContain('¥88.00')
@@ -77,6 +79,8 @@ describe('TransactionList', () => {
     await wrapper.get('input[name="filter_category"]').setValue('餐饮')
     await wrapper.get('input[name="filter_start_date"]').setValue('2026-07-01')
     await wrapper.get('input[name="filter_end_date"]').setValue('2026-07-31')
+    await wrapper.get('input[name="filter_min_amount"]').setValue('88.00')
+    await wrapper.get('input[name="filter_max_amount"]').setValue('100.00')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
 
@@ -87,12 +91,43 @@ describe('TransactionList', () => {
       category: '餐饮',
       start_date: '2026-07-01',
       end_date: '2026-07-31',
+      min_amount: '88',
+      max_amount: '100',
     })
 
     await wrapper.get('nav button:last-child').trigger('click')
     await flushPromises()
     expect(mockedListTransactions).toHaveBeenLastCalledWith(
       expect.objectContaining({ page: 2 }),
+    )
+  })
+
+  it('blocks an invalid amount range without requesting', async () => {
+    const wrapper = mount(TransactionList, { props: { refreshKey: 0 } })
+    await flushPromises()
+
+    await wrapper.get('input[name="filter_min_amount"]').setValue('100.00')
+    await wrapper.get('input[name="filter_max_amount"]').setValue('50.00')
+    await wrapper.get('form').trigger('submit')
+    await flushPromises()
+
+    expect(mockedListTransactions).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[role="alert"]').text()).toBe('最低金额不能大于最高金额')
+  })
+
+  it('reset clears amount filters and reloads without them', async () => {
+    const wrapper = mount(TransactionList, { props: { refreshKey: 0 } })
+    await flushPromises()
+
+    await wrapper.get('input[name="filter_min_amount"]').setValue('10.00')
+    await wrapper.get('input[name="filter_max_amount"]').setValue('20.00')
+    await wrapper.get('button.secondary-button').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get<HTMLInputElement>('input[name="filter_min_amount"]').element.value).toBe('')
+    expect(wrapper.get<HTMLInputElement>('input[name="filter_max_amount"]').element.value).toBe('')
+    expect(mockedListTransactions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ min_amount: undefined, max_amount: undefined }),
     )
   })
 

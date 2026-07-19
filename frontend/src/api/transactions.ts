@@ -21,6 +21,8 @@ export interface TransactionQuery {
   category?: string
   start_date?: string
   end_date?: string
+  min_amount?: string
+  max_amount?: string
 }
 
 export interface TransactionPageData {

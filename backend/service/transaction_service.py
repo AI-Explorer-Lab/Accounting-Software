@@ -40,6 +40,8 @@ async def execute_list_transactions(
         category=query.category.strip() if query.category else None,
         start_date=query.start_date,
         end_date=query.end_date,
+        min_amount=query.min_amount,
+        max_amount=query.max_amount,
     )
 
 

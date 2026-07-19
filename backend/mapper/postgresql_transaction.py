@@ -66,6 +66,8 @@ async def list_records(
     category: str | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
+    min_amount: Decimal | None = None,
+    max_amount: Decimal | None = None,
 ) -> tuple[list[TransactionEntity], int]:
     filters = []
     if transaction_type is not None:
@@ -76,6 +78,10 @@ async def list_records(
         filters.append(TransactionEntity.transaction_date >= start_date)
     if end_date is not None:
         filters.append(TransactionEntity.transaction_date <= end_date)
+    if min_amount is not None:
+        filters.append(TransactionEntity.amount >= min_amount)
+    if max_amount is not None:
+        filters.append(TransactionEntity.amount <= max_amount)
 
     total_result = await session.execute(
         select(func.count()).select_from(TransactionEntity).where(*filters)
