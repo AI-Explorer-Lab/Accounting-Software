@@ -12,6 +12,7 @@ vi.mock('../api/transactions', () => ({
 
 const mockedDeleteTransaction = vi.mocked(deleteTransaction)
 const mockedListTransactions = vi.mocked(listTransactions)
+const mockedConfirm = vi.spyOn(window, 'confirm')
 
 const pageResponse = (total = 1, amounts = ['88.00']) => ({
   success: true,
@@ -36,6 +37,8 @@ describe('TransactionList', () => {
   beforeEach(() => {
     mockedListTransactions.mockReset()
     mockedDeleteTransaction.mockReset()
+    mockedConfirm.mockReset()
+    mockedConfirm.mockReturnValue(true)
     mockedListTransactions.mockResolvedValue(pageResponse())
   })
 
@@ -138,7 +141,22 @@ describe('TransactionList', () => {
     )
   })
 
-  it('deletes a transaction and reloads the list', async () => {
+  it('cancels deletion without deleting, reloading, or showing success feedback', async () => {
+    mockedConfirm.mockReturnValue(false)
+    const wrapper = mount(TransactionList, { props: { refreshKey: 0 } })
+    await flushPromises()
+
+    await wrapper.get('button[aria-label="删除 餐饮 交易"]').trigger('click')
+    await flushPromises()
+
+    expect(mockedConfirm).toHaveBeenCalledWith('确认删除分类为“餐饮”的交易吗？')
+    expect(mockedDeleteTransaction).not.toHaveBeenCalled()
+    expect(mockedListTransactions).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('交易已删除')
+  })
+
+  it('confirms deletion with the correct transaction ID and reloads the list', async () => {
     mockedDeleteTransaction.mockResolvedValue({
       success: true,
       data: { id: 7 },
@@ -151,6 +169,7 @@ describe('TransactionList', () => {
     await wrapper.get('button[aria-label="删除 餐饮 交易"]').trigger('click')
     await flushPromises()
 
+    expect(mockedConfirm).toHaveBeenCalledWith('确认删除分类为“餐饮”的交易吗？')
     expect(mockedDeleteTransaction).toHaveBeenCalledWith(7)
     expect(mockedListTransactions).toHaveBeenCalledTimes(2)
     expect(wrapper.get('[role="status"]').text()).toBe('交易已删除')
