@@ -145,6 +145,8 @@ async def test_list_transactions_supports_pagination_and_filters(
                 "category": "Food",
                 "start_date": "2026-07-01",
                 "end_date": "2026-07-31",
+                "min_amount": "88.00",
+                "max_amount": "100.00",
             },
         )
 
@@ -154,6 +156,8 @@ async def test_list_transactions_supports_pagination_and_filters(
     assert captured_query.page_size == 5
     assert captured_query.transaction_type is TransactionType.EXPENSE
     assert captured_query.category == "Food"
+    assert captured_query.min_amount == Decimal("88.00")
+    assert captured_query.max_amount == Decimal("100.00")
     body = response.json()
     assert body["data"] == {
         "items": [
@@ -208,6 +212,31 @@ async def test_list_transactions_rejects_reversed_date_range() -> None:
 
     assert response.status_code == 422
     assert response.json()["message"] == "start_date cannot be after end_date"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("params", "message"),
+    [
+        ({"min_amount": "0"}, "greater_than"),
+        ({"min_amount": "-1"}, "greater_than"),
+        ({"max_amount": "not-a-number"}, "decimal_parsing"),
+        (
+            {"min_amount": "20.00", "max_amount": "10.00"},
+            "min_amount cannot be greater than max_amount",
+        ),
+    ],
+)
+async def test_list_transactions_rejects_invalid_amount_range(
+    params: dict[str, str],
+    message: str,
+) -> None:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/transactions", params=params)
+
+    assert response.status_code == 422
+    assert message in response.text
 
 
 @pytest.mark.asyncio

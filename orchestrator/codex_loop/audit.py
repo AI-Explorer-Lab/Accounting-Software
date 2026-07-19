@@ -235,16 +235,31 @@ class AuditRecorder:
                 self._record_file_change(turn_number, item)
 
     def current_diff_sha256(self) -> str:
-        raw = self._complete_diff()
-        return _sha256_bytes(raw)
+        return _sha256_bytes(self.current_diff_bytes())
+
+    def current_diff_bytes(self) -> bytes:
+        return self._complete_diff()
 
     def current_cumulative_diff_sha256(self) -> str:
-        return _sha256_bytes(self._cumulative_diff())
+        return _sha256_bytes(self.current_cumulative_diff_bytes())
+
+    def current_cumulative_diff_bytes(self) -> bytes:
+        return self._cumulative_diff()
 
     def changed_paths(self) -> list[str]:
         paths = set(self._name_status())
         paths.update(self._untracked_paths())
         return sorted(paths)
+
+    def current_diff_text(self) -> str:
+        """Return the current complete diff for a bounded evaluator excerpt."""
+
+        return self._complete_diff().decode("utf-8", errors="replace")
+
+    def current_changed_files(self) -> list[dict[str, Any]]:
+        """Return current file metadata without persisting final artifacts."""
+
+        return self._changed_files()
 
     def has_event(
         self,

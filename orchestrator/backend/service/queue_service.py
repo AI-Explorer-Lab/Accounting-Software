@@ -10,6 +10,7 @@ from orchestrator.codex_loop.models import (
     QueueTaskStatus,
     generate_queue_id,
     utc_now_iso,
+    TaskQueueSpec,
 )
 from orchestrator.codex_loop.state import ActiveRunError, StateStore
 
@@ -77,6 +78,25 @@ class QueueService:
                 raise TaskConflictError(str(exc)) from exc
         snapshot = self.mapper.load_snapshot(state.queue_id)
         if snapshot is None:  # pragma: no cover - prepare persists both files
+            raise QueueNotFoundError(state.queue_id)
+        return snapshot
+
+    def start_spec(self, spec: TaskQueueSpec) -> QueueSnapshot:
+        """Start one immutable queue produced by a confirmed Plan."""
+
+        with self._submission_lock:
+            self._ensure_available()
+            workflow = self.workflow_factory()
+            try:
+                state, _ = self.executor.prepare_and_submit(
+                    spec.queue_id,
+                    lambda: workflow.prepare_spec(spec),
+                    lambda prepared: workflow.run_current(prepared.queue_id),
+                )
+            except (ActiveRunError, RuntimeError) as exc:
+                raise TaskConflictError(str(exc)) from exc
+        snapshot = self.mapper.load_snapshot(state.queue_id)
+        if snapshot is None:
             raise QueueNotFoundError(state.queue_id)
         return snapshot
 

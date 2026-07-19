@@ -37,6 +37,7 @@ class TemplateRenderer:
         "initial_prompt.md",
         "repair_prompt.md",
         "review_repair_prompt.md",
+        "evaluation_repair_prompt.md",
         "final_report.md",
     }
 
@@ -130,6 +131,30 @@ class PromptRenderer:
                 "review_comment": sanitize_for_codex(
                     review_comment or "审查人要求继续修改。",
                     self.repair_summary_limit,
+                ),
+                "changed_files": ", ".join(changed_files or []) or "无",
+                "diff_sha256": diff_sha256 or "尚未生成",
+            },
+        )
+
+    def evaluation_repair_prompt(
+        self,
+        task: TaskSpec,
+        state: RunState,
+        evaluation_summary: str,
+        *,
+        changed_files: list[str] | None = None,
+        diff_sha256: str = "",
+    ) -> str:
+        return self.renderer.render(
+            "evaluation_repair_prompt.md",
+            {
+                "task_id": task.task_id,
+                "queue_context": _queue_context(task),
+                "turn_number": state.turn_count + 1,
+                "requirement": task.requirement,
+                "evaluation_summary": sanitize_for_codex(
+                    evaluation_summary, self.repair_summary_limit
                 ),
                 "changed_files": ", ".join(changed_files or []) or "无",
                 "diff_sha256": diff_sha256 or "尚未生成",

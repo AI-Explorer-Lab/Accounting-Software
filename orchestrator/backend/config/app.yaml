@@ -12,7 +12,17 @@ default:
     repo_root: null
     validation_timeout_seconds: 900
     max_parallel_projects: 2
-    projects: []
+    harness_enabled: true
+    knowledge:
+      repo_root: /Users/mon/Documents/Knowledge-Base
+      mcp_registry: /Users/mon/Documents/mcp/registry.json
+      knowledge_writer_actor_id: orchestrator
+    projects:
+      - id: accounting
+        name: Accounting Software
+        repo_root: .
+        default: true
+        knowledge_actor_id: zhangsan
   notifications:
     webhook_url: null
     smtp_host: null

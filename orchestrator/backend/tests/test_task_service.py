@@ -13,7 +13,12 @@ from orchestrator.backend.exceptions.business_exception import (
 )
 from orchestrator.backend.service.task_service import TaskService
 from orchestrator.backend.utils.task_executor import TaskExecutor
-from orchestrator.codex_loop.models import RunResult, TaskQueueSpec, TaskSpec
+from orchestrator.codex_loop.models import (
+    DeliveryStatus,
+    RunResult,
+    TaskQueueSpec,
+    TaskSpec,
+)
 from orchestrator.codex_loop.report import ReportBuilder
 from orchestrator.codex_loop.state import QueueStore, StateStore
 
@@ -300,3 +305,47 @@ def test_control_request_is_durable_before_a_gated_task_initializes(
     finally:
         gate.release()
         service.close(wait=True)
+
+
+def test_archive_initial_and_retry_callbacks_use_separate_checkpoints(
+    tmp_path: Path,
+) -> None:
+    store = StateStore(tmp_path)
+    task = TaskSpec(
+        task_id="archive-callback",
+        requirement="Archive safely",
+        acceptance_criteria=["Retry does not rerun the archiver role"],
+    )
+    state = store.initialize_run(task)
+    state.mark_success()
+    state.delivery_status = DeliveryStatus.COMMITTED
+    store.save_state(state)
+    calls: list[str] = []
+
+    def archive(task_id: str, *, store: StateStore) -> dict[str, object]:
+        calls.append(f"archive:{task_id}")
+        current = store.load_state(task_id)
+        current.delivery_status = DeliveryStatus.FAILED
+        store.save_state(current)
+        return {"status": "failed"}
+
+    def retry(task_id: str, *, store: StateStore) -> dict[str, object]:
+        calls.append(f"retry:{task_id}")
+        current = store.load_state(task_id)
+        current.delivery_status = DeliveryStatus.ARCHIVED
+        store.save_state(current)
+        return {"status": "completed"}
+
+    service = TaskService(
+        tmp_path,
+        archive_callback=archive,
+        archive_retry_callback=retry,
+    )
+    try:
+        service._archive_after_commit(task.task_id, store)
+        snapshot = service.retry_archive(task.task_id)
+    finally:
+        service.close(wait=True)
+
+    assert calls == ["archive:archive-callback", "retry:archive-callback"]
+    assert snapshot.delivery_status == "archived"

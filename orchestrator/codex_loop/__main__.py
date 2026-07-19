@@ -9,6 +9,7 @@ import sys
 from typing import Any
 
 from .models import (
+    DeliveryStatus,
     InfrastructureError,
     QueueStatus,
     ReviewStatus,
@@ -17,6 +18,8 @@ from .models import (
     RunStatus,
     TaskSpec,
 )
+from .git_delivery import GitDeliveryService
+from .harness_runtime import HarnessRuntime
 from .report import ReportBuilder
 from .queue_workflow import QueueWorkflow
 from .review import ReviewError, ReviewService
@@ -66,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     review_parser.add_argument("--reviewer", required=True)
     review_parser.add_argument("--comment", default="")
     review_parser.add_argument("--reviewed-diff-sha256", required=True)
+    review_parser.add_argument("--commit-subject", default="")
 
     show_parser = subparsers.add_parser(
         "show", help="show read-only workspace, permission, and audit metadata"
@@ -114,21 +118,32 @@ def main(argv: list[str] | None = None) -> int:
                 result = _record_invalid_configuration(store, exc)
                 _print_result(result, store)
                 return 2
-            workflow = OrchestrationWorkflow(
-                REPO_ROOT,
-                store=store,
-                validation_timeout_seconds=args.timeout_seconds,
+            runtime = _configured_harness_runtime(args.timeout_seconds)
+            workflow = (
+                runtime.workflow(store=store)
+                if runtime is not None
+                else OrchestrationWorkflow(
+                    REPO_ROOT,
+                    store=store,
+                    validation_timeout_seconds=args.timeout_seconds,
+                )
             )
             result = workflow.start(task)
         elif args.command == "resume":
             task_id = args.task_id or _find_resumable_task_id(store)
-            workflow = OrchestrationWorkflow(
-                REPO_ROOT,
-                store=store,
-                validation_timeout_seconds=args.timeout_seconds,
+            runtime = _configured_harness_runtime(args.timeout_seconds)
+            workflow = (
+                runtime.workflow(store=store)
+                if runtime is not None
+                else OrchestrationWorkflow(
+                    REPO_ROOT,
+                    store=store,
+                    validation_timeout_seconds=args.timeout_seconds,
+                )
             )
             result = workflow.resume(task_id)
         elif args.command == "review":
+            runtime = _configured_harness_runtime()
             queue_id = queue_store.find_queue_for_task(args.task_id)
             if queue_id is None:
                 review = ReviewService(REPO_ROOT, store=store).record(
@@ -137,10 +152,23 @@ def main(argv: list[str] | None = None) -> int:
                     reviewer=args.reviewer,
                     comment=args.comment,
                     reviewed_diff_sha256=args.reviewed_diff_sha256,
+                    commit_subject=args.commit_subject,
                 )
-                print(json.dumps(review.to_dict(), ensure_ascii=False, indent=2))
+                payload: dict[str, Any] = {"review": review.to_dict()}
+                if review.decision is ReviewStatus.APPROVED and runtime is not None:
+                    payload["commit"] = GitDeliveryService(
+                        REPO_ROOT, store=store
+                    ).deliver(args.task_id, review=review)
+                    payload["archive"] = _archive_after_commit(
+                        runtime, args.task_id, store
+                    )
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
             else:
-                workflow = QueueWorkflow(REPO_ROOT, queue_store=queue_store)
+                workflow = (
+                    runtime.queue_workflow()
+                    if runtime is not None
+                    else QueueWorkflow(REPO_ROOT, queue_store=queue_store)
+                )
                 queue_state, review = workflow.record_review(
                     queue_id,
                     args.task_id,
@@ -148,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
                     reviewer=args.reviewer,
                     comment=args.comment,
                     reviewed_diff_sha256=args.reviewed_diff_sha256,
+                    commit_subject=args.commit_subject,
                 )
                 if queue_state.status in {QueueStatus.PENDING, QueueStatus.RUNNING}:
                     queue_state = workflow.run_current(queue_id)
@@ -164,11 +193,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         elif args.command == "queue-start":
             values = _queue_values_from_file(args.task_file)
-            queue_state = QueueWorkflow(
-                REPO_ROOT,
-                queue_store=queue_store,
-                validation_timeout_seconds=args.timeout_seconds,
-            ).start(
+            runtime = _configured_harness_runtime(args.timeout_seconds)
+            workflow = (
+                runtime.queue_workflow()
+                if runtime is not None
+                else QueueWorkflow(
+                    REPO_ROOT,
+                    queue_store=queue_store,
+                    validation_timeout_seconds=args.timeout_seconds,
+                )
+            )
+            queue_state = workflow.start(
                 values["name"],
                 values["subtasks"],
                 queue_id=values.get("queue_id"),
@@ -178,11 +213,17 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if queue_state.status is QueueStatus.COMPLETED else 1
         elif args.command == "queue-resume":
             queue_id = args.queue_id or _find_resumable_queue_id(queue_store)
-            queue_state = QueueWorkflow(
-                REPO_ROOT,
-                queue_store=queue_store,
-                validation_timeout_seconds=args.timeout_seconds,
-            ).resume(queue_id)
+            runtime = _configured_harness_runtime(args.timeout_seconds)
+            workflow = (
+                runtime.queue_workflow()
+                if runtime is not None
+                else QueueWorkflow(
+                    REPO_ROOT,
+                    queue_store=queue_store,
+                    validation_timeout_seconds=args.timeout_seconds,
+                )
+            )
+            queue_state = workflow.resume(queue_id)
             _print_queue(queue_store, queue_id)
             return 0 if queue_state.status is QueueStatus.COMPLETED else 1
         else:
@@ -204,6 +245,65 @@ def main(argv: list[str] | None = None) -> int:
     if result.status is RunStatus.MANUAL_REVIEW:
         return 1
     return 2
+
+
+def _configured_harness_runtime(
+    timeout_seconds: float | None = None,
+) -> HarnessRuntime | None:
+    """Build the same project-scoped Harness runtime used by the local API."""
+
+    from orchestrator.backend.config.config import projects_from_settings, settings
+
+    agent = settings.get("agent", {}) or {}
+    if not bool(agent.get("harness_enabled", False)):
+        return None
+    projects = projects_from_settings(settings)
+    project = next(
+        (
+            item
+            for item in projects
+            if Path(item["repo_root"]).resolve() == REPO_ROOT.resolve()
+        ),
+        next(item for item in projects if bool(item["is_default"])),
+    )
+    knowledge = agent.get("knowledge", {}) or {}
+    return HarnessRuntime(
+        REPO_ROOT,
+        project_id=str(project["project_id"]),
+        knowledge_actor_id=str(project.get("knowledge_actor_id", "")),
+        knowledge_writer_actor_id=str(
+            knowledge.get("knowledge_writer_actor_id", "")
+        ),
+        mcp_registry=str(knowledge.get("mcp_registry", "")),
+        validation_timeout_seconds=float(
+            timeout_seconds
+            if timeout_seconds is not None
+            else agent.get("validation_timeout_seconds", 900)
+        ),
+    )
+
+
+def _archive_after_commit(
+    runtime: HarnessRuntime,
+    task_id: str,
+    store: StateStore,
+) -> dict[str, Any]:
+    """Keep a successful task commit when local archive/knowledge work fails."""
+
+    try:
+        return runtime.archive(task_id, store=store)
+    except Exception as exc:
+        message = redact_sensitive_text(str(exc) or type(exc).__name__)
+        state = store.load_state(task_id)
+        state.delivery_status = DeliveryStatus.FAILED
+        state.last_error_summary = message
+        store.save_state(state)
+        store.append_event(
+            task_id,
+            "knowledge.write_failed",
+            {"error": message},
+        )
+        return {"status": "failed", "error": message}
 
 
 def _task_from_arguments(args: argparse.Namespace) -> TaskSpec:

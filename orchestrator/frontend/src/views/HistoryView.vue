@@ -60,6 +60,7 @@ onMounted(() => void load());
           <span class="kind-icon" :class="`kind-${item.kind}`">{{ item.kind === 'queue' ? 'Q' : 'T' }}</span>
           <span class="history-title"><strong>{{ item.title }}</strong><small>{{ item.project_name }} · {{ item.identifier }}</small></span>
           <span class="status-chip" :class="`status-${item.status}`">{{ item.status }}</span>
+          <span class="delivery-history-state">{{ item.delivery_status || "该记录不具备" }}</span>
           <time>{{ formatTime(item.updated_at) }}</time>
           <span class="row-chevron">›</span>
         </button>

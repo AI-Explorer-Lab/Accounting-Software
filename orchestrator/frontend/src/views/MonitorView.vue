@@ -38,6 +38,21 @@ const canRerun = computed(() => {
     ? ["completed", "cancelled", "rejected", "infrastructure_error"].includes(status || "")
     : ["success", "manual_review", "infrastructure_error", "cancelled"].includes(status || "");
 });
+const planCheckpoint = computed(() =>
+  store.events.value.some((event) => event.type === "plan.confirmed")
+    ? "人工已确认"
+    : "直接创建 / 旧记录",
+);
+const harnessCheckpoints = computed(() => {
+  const task = store.task.value;
+  return [
+    { label: "Planner", value: planCheckpoint.value },
+    { label: "Context", value: task && Object.keys(task.context).length ? "快照已冻结" : "该记录不具备" },
+    { label: "四层评估", value: task && Object.keys(task.evaluations).length ? "结果已持久化" : "尚未产出" },
+    { label: "Commit", value: task?.commit.commit_sha ? String(task.commit.commit_sha).slice(0, 10) : task?.delivery_status || "not_ready" },
+    { label: "Archive", value: task?.delivery_status === "archived" ? "已完成" : task?.archive.outbox ? "已有检查点" : "尚未开始" },
+  ];
+});
 
 async function cancel(): Promise<void> {
   confirmCancel.value = false;
@@ -80,6 +95,12 @@ async function cancel(): Promise<void> {
         @move="store.movePendingSubtask"
       />
       <TaskStatus v-if="store.task.value" :task="store.task.value" />
+      <section v-if="store.task.value" class="surface harness-checkpoints" data-test="harness-checkpoints">
+        <div class="surface-heading compact-heading"><div><span class="section-kicker">Harness 控制面</span><h2>阶段检查点</h2></div></div>
+        <div class="checkpoint-grid">
+          <div v-for="item in harnessCheckpoints" :key="item.label"><span>{{ item.label }}</span><strong>{{ item.value }}</strong></div>
+        </div>
+      </section>
 
       <div class="monitor-grid">
         <EventTimeline :events="store.events.value" />

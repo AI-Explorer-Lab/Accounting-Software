@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -86,10 +87,14 @@ async def list_transactions(
     category: str | None = Query(default=None, max_length=100),
     start_date: date | None = Query(default=None),
     end_date: date | None = Query(default=None),
+    min_amount: Decimal | None = Query(default=None, gt=0),
+    max_amount: Decimal | None = Query(default=None, gt=0),
     session: AsyncSession = Depends(get_session),
 ) -> ApiResponse[TransactionPageData]:
     if start_date is not None and end_date is not None and start_date > end_date:
         raise BusinessException("start_date cannot be after end_date", status_code=422)
+    if min_amount is not None and max_amount is not None and min_amount > max_amount:
+        raise BusinessException("min_amount cannot be greater than max_amount", status_code=422)
 
     query = TransactionListRequest(
         page=page,
@@ -98,6 +103,8 @@ async def list_transactions(
         category=category,
         start_date=start_date,
         end_date=end_date,
+        min_amount=min_amount,
+        max_amount=max_amount,
     )
     records, total = await execute_list_transactions(query, session)
     return ApiResponse(

@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .audit import AuditRecorder
 from .models import (
+    DeliveryStatus,
     InfrastructureError,
     ReviewRecord,
     ReviewStatus,
@@ -41,6 +42,7 @@ class ReviewService:
         reviewer: str,
         comment: str,
         reviewed_diff_sha256: str,
+        commit_subject: str = "",
     ) -> ReviewRecord:
         """Record a decision after rechecking the live worktree diff."""
 
@@ -108,6 +110,9 @@ class ReviewService:
             if current_sha != expected:
                 raise ReviewError("the task worktree changed after the final diff was captured")
 
+            resolved_subject = str(commit_subject).strip()
+            if normalized_decision is ReviewStatus.APPROVED and not resolved_subject:
+                resolved_subject = task.requirement.splitlines()[0].strip()[:200]
             review = ReviewRecord(
                 task_id=task_id,
                 decision=normalized_decision,
@@ -115,6 +120,7 @@ class ReviewService:
                 comment=comment,
                 machine_status=state.status,
                 reviewed_diff_sha256=supplied_sha,
+                commit_subject=resolved_subject,
             )
             if queue_task:
                 review.review_number = len(self.store.load_review_history(task_id)) + 1
@@ -128,10 +134,16 @@ class ReviewService:
                     "decision": review.decision.value,
                     "reviewer": review.reviewer,
                     "reviewed_diff_sha256": review.reviewed_diff_sha256,
+                    "commit_subject": review.commit_subject,
                 },
                 source="reviewer",
             )
             state.review_status = review.decision
+            state.delivery_status = (
+                DeliveryStatus.COMMIT_PENDING
+                if review.decision is ReviewStatus.APPROVED
+                else DeliveryStatus.NOT_READY
+            )
             self.store.save_state(state)
 
             permissions_path = run_dir / "permissions.json"

@@ -37,6 +37,15 @@ class ActiveRunError(RuntimeError):
     """Raised when another live process owns the repository-wide task lock."""
 
 
+def has_only_plan_artifacts(path: Path) -> bool:
+    """Allow a confirmed plan to occupy its final root before execution starts."""
+
+    if not path.is_dir():
+        return False
+    entries = list(path.iterdir())
+    return bool(entries) and all(entry.name == "plan" and entry.is_dir() for entry in entries)
+
+
 _SENSITIVE_NAME = re.compile(
     r"(?:api[_-]?key|token|password|passwd|pwd|secret|credential|authorization|"
     r"access[_-]?key|private[_-]?key)",
@@ -262,7 +271,11 @@ class StateStore:
         baseline_test_hashes: Mapping[str, str] | None = None,
     ) -> RunState:
         run_directory = self.run_dir(task.task_id)
-        if run_directory.exists() and any(run_directory.iterdir()):
+        if (
+            run_directory.exists()
+            and any(run_directory.iterdir())
+            and not has_only_plan_artifacts(run_directory)
+        ):
             raise ValueError(f"run directory already exists: {task.task_id}")
         run_directory.mkdir(parents=True, exist_ok=True)
         workspace_values = dict(workspace or {})
@@ -633,7 +646,11 @@ class QueueStore:
 
     def initialize_queue(self, spec: TaskQueueSpec) -> QueueState:
         queue_dir = self.queue_dir(spec.queue_id)
-        if queue_dir.exists() and any(queue_dir.iterdir()):
+        if (
+            queue_dir.exists()
+            and any(queue_dir.iterdir())
+            and not has_only_plan_artifacts(queue_dir)
+        ):
             raise ValueError(f"queue directory already exists: {spec.queue_id}")
         if not spec.base_commit:
             raise ValueError("queue base_commit must be resolved before persistence")
@@ -766,4 +783,5 @@ __all__ = [
     "redact_sensitive_data",
     "redact_sensitive_text",
     "sanitize_for_codex",
+    "has_only_plan_artifacts",
 ]

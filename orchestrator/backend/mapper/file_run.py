@@ -61,6 +61,22 @@ class FileRunMapper:
             else self._optional_json(run_dir / "review.json")
         )
         events = self._events(run_dir / "events.jsonl")
+        context = {
+            "generation": self._optional_json(run_dir / "context/generation.json"),
+            "evaluation": self._optional_json(run_dir / "context/evaluation.json"),
+        }
+        evaluations = {
+            "specification": self._optional_json(run_dir / "evaluations/spec.json"),
+            "architecture": self._optional_json(
+                run_dir / "evaluations/architecture.json"
+            ),
+            "aggregate": self._optional_json(run_dir / "evaluations/aggregate.json"),
+        }
+        commit = self._optional_json(run_dir / "delivery/commit.json")
+        archive = {
+            "summary": self._optional_json(run_dir / "archive/summary.json"),
+            "outbox": self._optional_json(run_dir / "archive/outbox.json"),
+        }
         repository = manifest.get("repository", {})
         workspace = (
             {
@@ -93,6 +109,9 @@ class FileRunMapper:
             machine_status=projected_status,
             review_status=(
                 "unavailable" if legacy else state.review_status.value
+            ),
+            delivery_status=(
+                "unavailable" if legacy else state.delivery_status.value
             ),
             phase=state.phase.value,
             thread_id=state.thread_id,
@@ -134,6 +153,12 @@ class FileRunMapper:
             ),
             review=review or None,
             review_history=review_history,
+            context={key: value for key, value in context.items() if value},
+            evaluations={
+                key: value for key, value in evaluations.items() if value
+            },
+            commit=commit,
+            archive={key: value for key, value in archive.items() if value},
             queue_id=task.queue_id,
             sequence=task.sequence,
             rerun_of=task.rerun_of,

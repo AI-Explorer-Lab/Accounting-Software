@@ -57,6 +57,9 @@ def projects_from_settings(config: Any = settings) -> list[dict[str, object]]:
                 "name": root.name,
                 "repo_root": root,
                 "is_default": True,
+                "knowledge_actor_id": str(
+                    agent.get("knowledge_actor_id", "")
+                ).strip(),
             }
         ]
     if isinstance(configured, (str, bytes)):
@@ -85,6 +88,9 @@ def projects_from_settings(config: Any = settings) -> list[dict[str, object]]:
                 "name": str(item.get("name") or root.name),
                 "repo_root": root,
                 "is_default": bool(item.get("default", index == 0)),
+                "knowledge_actor_id": str(
+                    item.get("knowledge_actor_id", "")
+                ).strip(),
             }
         )
     defaults = [item for item in projects if item["is_default"]]
@@ -115,11 +121,31 @@ def validate_settings(config: Any = settings) -> None:
     if max_parallel < 1:
         raise RuntimeError("agent.max_parallel_projects must be at least 1")
 
+    if bool(agent.get("harness_enabled", False)):
+        knowledge = agent.get("knowledge", {}) or {}
+        knowledge_root = Path(str(knowledge.get("repo_root", ""))).expanduser()
+        registry_path = Path(str(knowledge.get("mcp_registry", ""))).expanduser()
+        writer = str(knowledge.get("knowledge_writer_actor_id", "")).strip()
+        if not knowledge_root.is_dir():
+            raise RuntimeError("agent.knowledge.repo_root must exist")
+        if not registry_path.is_file():
+            raise RuntimeError("agent.knowledge.mcp_registry must exist")
+        if not writer:
+            raise RuntimeError(
+                "agent.knowledge.knowledge_writer_actor_id must not be blank"
+            )
+
     for project in projects_from_settings(config):
         repo_root = Path(project["repo_root"])
         if not repo_root.is_dir():
             raise RuntimeError(
                 f"project repo_root does not exist: {repo_root}"
+            )
+        if bool(agent.get("harness_enabled", False)) and not str(
+            project.get("knowledge_actor_id", "")
+        ).strip():
+            raise RuntimeError(
+                f"project {project['project_id']} has no knowledge_actor_id"
             )
 
 

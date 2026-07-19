@@ -73,6 +73,18 @@ class ReviewStatus(str, Enum):
     REJECTED = "rejected"
 
 
+class DeliveryStatus(str, Enum):
+    """Post-review delivery and archive state, independent of run/review state."""
+
+    NOT_READY = "not_ready"
+    COMMIT_PENDING = "commit_pending"
+    COMMITTING = "committing"
+    COMMITTED = "committed"
+    ARCHIVE_PENDING = "archive_pending"
+    ARCHIVED = "archived"
+    FAILED = "failed"
+
+
 class QueueStatus(str, Enum):
     """Lifecycle of one ordered, human-gated task queue."""
 
@@ -121,6 +133,8 @@ class RunPhase(str, Enum):
     CODEX_TURN = "codex_turn"
     VALIDATION_PENDING = "validation_pending"
     VALIDATING = "validating"
+    EVALUATION_PENDING = "evaluation_pending"
+    EVALUATING = "evaluating"
     COMPLETED = "completed"
 
 
@@ -128,6 +142,7 @@ class PromptKind(str, Enum):
     INITIAL = "initial"
     REPAIR = "repair"
     REVIEW_REPAIR = "review_repair"
+    EVALUATION_REPAIR = "evaluation_repair"
 
 
 class JsonModel:
@@ -175,6 +190,7 @@ class ReviewRecord(JsonModel):
     comment: str
     machine_status: RunStatus
     reviewed_diff_sha256: str
+    commit_subject: str = ""
     review_number: int = 1
     reviewed_at: str = field(default_factory=utc_now_iso)
     schema_version: int = SCHEMA_VERSION
@@ -185,10 +201,15 @@ class ReviewRecord(JsonModel):
         self.reviewer = str(self.reviewer).strip()
         self.comment = str(self.comment).strip()
         self.reviewed_diff_sha256 = str(self.reviewed_diff_sha256).strip()
+        self.commit_subject = str(self.commit_subject).strip()
         if not self.reviewer:
             raise ValueError("reviewer must be a non-empty string")
         if not re.fullmatch(r"[0-9a-f]{64}", self.reviewed_diff_sha256):
             raise ValueError("reviewed_diff_sha256 must be a lowercase SHA-256")
+        if "\n" in self.commit_subject or "\r" in self.commit_subject:
+            raise ValueError("commit_subject must be a single line")
+        if len(self.commit_subject) > 200:
+            raise ValueError("commit_subject must be at most 200 characters")
         self.review_number = int(self.review_number)
         if self.review_number < 1:
             raise ValueError("review_number must be at least 1")
@@ -202,6 +223,7 @@ class ReviewRecord(JsonModel):
             "comment": self.comment,
             "machine_status": self.machine_status.value,
             "reviewed_diff_sha256": self.reviewed_diff_sha256,
+            "commit_subject": self.commit_subject,
             "review_number": self.review_number,
             "reviewed_at": self.reviewed_at,
         }
@@ -215,6 +237,7 @@ class ReviewRecord(JsonModel):
             comment=str(data.get("comment", "")),
             machine_status=RunStatus(str(data["machine_status"])),
             reviewed_diff_sha256=str(data.get("reviewed_diff_sha256", "")),
+            commit_subject=str(data.get("commit_subject", "")),
             review_number=int(data.get("review_number", 1)),
             reviewed_at=str(data.get("reviewed_at") or utc_now_iso()),
             schema_version=int(data.get("schema_version", SCHEMA_VERSION)),
@@ -467,6 +490,7 @@ class QueueTaskState(JsonModel):
     status: QueueTaskStatus = QueueTaskStatus.PENDING
     machine_status: RunStatus | None = None
     review_status: ReviewStatus = ReviewStatus.PENDING
+    delivery_status: DeliveryStatus = DeliveryStatus.NOT_READY
     thread_id: str | None = None
     last_error_summary: str = ""
     updated_at: str = field(default_factory=utc_now_iso)
@@ -480,6 +504,7 @@ class QueueTaskState(JsonModel):
                 None if self.machine_status is None else self.machine_status.value
             ),
             "review_status": self.review_status.value,
+            "delivery_status": self.delivery_status.value,
             "thread_id": self.thread_id,
             "last_error_summary": self.last_error_summary,
             "updated_at": self.updated_at,
@@ -496,6 +521,9 @@ class QueueTaskState(JsonModel):
                 None if machine_status is None else RunStatus(str(machine_status))
             ),
             review_status=ReviewStatus(str(data.get("review_status", "pending"))),
+            delivery_status=DeliveryStatus(
+                str(data.get("delivery_status", DeliveryStatus.NOT_READY.value))
+            ),
             thread_id=(
                 None if data.get("thread_id") is None else str(data["thread_id"])
             ),
@@ -796,6 +824,7 @@ class RunState(JsonModel):
     source_worktree_was_dirty: bool = False
     permission_verified: bool = False
     review_status: ReviewStatus = ReviewStatus.PENDING
+    delivery_status: DeliveryStatus = DeliveryStatus.NOT_READY
     last_diff_sha256: str = ""
     diff_redaction_count: int = 0
     status: RunStatus = RunStatus.RUNNING
@@ -813,6 +842,7 @@ class RunState(JsonModel):
     final_git_summary: str = ""
     last_error_summary: str = ""
     infrastructure_error: str | None = None
+    pending_evaluation_summary: str = ""
     started_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
     finished_at: str | None = None
@@ -855,9 +885,11 @@ class RunState(JsonModel):
         self.phase = RunPhase.PROMPT_PENDING
         self.pending_prompt_kind = PromptKind.REVIEW_REPAIR
         self.review_status = ReviewStatus.PENDING
+        self.delivery_status = DeliveryStatus.NOT_READY
         self.cycle_failure_count = 0
         self.cycle_turn_count = 0
         self.infrastructure_error = None
+        self.pending_evaluation_summary = ""
         self.finished_at = None
         self.touch()
 
@@ -955,6 +987,7 @@ class RunState(JsonModel):
             "source_worktree_was_dirty": self.source_worktree_was_dirty,
             "permission_verified": self.permission_verified,
             "review_status": self.review_status.value,
+            "delivery_status": self.delivery_status.value,
             "last_diff_sha256": self.last_diff_sha256,
             "diff_redaction_count": self.diff_redaction_count,
             "status": self.status.value,
@@ -979,6 +1012,7 @@ class RunState(JsonModel):
             "final_git_summary": self.final_git_summary,
             "last_error_summary": self.last_error_summary,
             "infrastructure_error": self.infrastructure_error,
+            "pending_evaluation_summary": self.pending_evaluation_summary,
             "started_at": self.started_at,
             "updated_at": self.updated_at,
             "finished_at": self.finished_at,
@@ -1010,6 +1044,9 @@ class RunState(JsonModel):
             permission_verified=bool(data.get("permission_verified", False)),
             review_status=ReviewStatus(
                 str(data.get("review_status", ReviewStatus.PENDING.value))
+            ),
+            delivery_status=DeliveryStatus(
+                str(data.get("delivery_status", DeliveryStatus.NOT_READY.value))
             ),
             last_diff_sha256=str(data.get("last_diff_sha256", "")),
             diff_redaction_count=int(data.get("diff_redaction_count", 0)),
@@ -1049,6 +1086,9 @@ class RunState(JsonModel):
                 if data.get("infrastructure_error") is None
                 else str(data["infrastructure_error"])
             ),
+            pending_evaluation_summary=str(
+                data.get("pending_evaluation_summary", "")
+            ),
             started_at=str(data.get("started_at") or utc_now_iso()),
             updated_at=str(data.get("updated_at") or utc_now_iso()),
             finished_at=(
@@ -1076,6 +1116,7 @@ class RunResult(JsonModel):
     queue_id: str | None = None
     sequence: int | None = None
     review_status: ReviewStatus = ReviewStatus.PENDING
+    delivery_status: DeliveryStatus = DeliveryStatus.NOT_READY
     workspace: dict[str, Any] = field(default_factory=dict)
     permissions: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, str] = field(default_factory=dict)
@@ -1117,6 +1158,7 @@ class RunResult(JsonModel):
             queue_id=state.queue_id,
             sequence=state.sequence,
             review_status=state.review_status,
+            delivery_status=state.delivery_status,
             workspace={
                 "base_ref": state.base_ref,
                 "base_commit": state.base_commit,
@@ -1150,6 +1192,7 @@ class RunResult(JsonModel):
             "status": self.status.value,
             "machine_status": self.status.value,
             "review_status": self.review_status.value,
+            "delivery_status": self.delivery_status.value,
             "requirement": self.requirement,
             "acceptance_criteria": list(self.acceptance_criteria),
             "repo_root": self.repo_root,
@@ -1212,6 +1255,9 @@ class RunResult(JsonModel):
             review_status=ReviewStatus(
                 str(data.get("review_status", ReviewStatus.PENDING.value))
             ),
+            delivery_status=DeliveryStatus(
+                str(data.get("delivery_status", DeliveryStatus.NOT_READY.value))
+            ),
             workspace={
                 str(key): value for key, value in dict(data.get("workspace", {})).items()
             },
@@ -1239,6 +1285,7 @@ class RunResult(JsonModel):
 __all__ = [
     "AuditEvent",
     "CommandResult",
+    "DeliveryStatus",
     "InfrastructureError",
     "PromptKind",
     "QUEUE_SCHEMA_VERSION",

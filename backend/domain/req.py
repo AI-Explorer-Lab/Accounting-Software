@@ -41,3 +41,5 @@ class TransactionListRequest(PaginationRequest):
     category: str | None = Field(default=None, max_length=100)
     start_date: date | None = None
     end_date: date | None = None
+    min_amount: Decimal | None = Field(default=None, gt=0)
+    max_amount: Decimal | None = Field(default=None, gt=0)

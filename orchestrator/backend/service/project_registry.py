@@ -5,11 +5,14 @@ from pathlib import Path
 from threading import BoundedSemaphore
 from typing import Any
 
+from orchestrator.codex_loop.harness_runtime import HarnessRuntime
+
 from ..config.config import projects_from_settings
 from ..exceptions.business_exception import ProjectNotFoundError
 from ..utils.task_executor import TaskExecutor
 from .queue_service import QueueService
 from .task_service import TaskService
+from .plan_service import PlanService
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,8 +21,11 @@ class ProjectContext:
     name: str
     repo_root: Path
     is_default: bool
+    knowledge_actor_id: str
+    harness: HarnessRuntime | None
     task_service: TaskService
     queue_service: QueueService
+    plan_service: PlanService | None
 
 
 class ProjectRegistry:
@@ -28,6 +34,8 @@ class ProjectRegistry:
     def __init__(self, config: Any) -> None:
         agent = config.get("agent", {}) or {}
         timeout = float(agent.get("validation_timeout_seconds", 900))
+        harness_enabled = bool(agent.get("harness_enabled", False))
+        knowledge = agent.get("knowledge", {}) or {}
         gate = BoundedSemaphore(int(agent.get("max_parallel_projects", 1)))
         self._contexts: dict[str, ProjectContext] = {}
         self._default_id = ""
@@ -35,23 +43,54 @@ class ProjectRegistry:
             project_id = str(item["project_id"])
             executor = TaskExecutor(global_gate=gate)
             root = Path(item["repo_root"])
+            harness = (
+                HarnessRuntime(
+                    root,
+                    project_id=project_id,
+                    knowledge_actor_id=str(item.get("knowledge_actor_id", "")),
+                    knowledge_writer_actor_id=str(
+                        knowledge.get("knowledge_writer_actor_id", "")
+                    ),
+                    mcp_registry=str(knowledge.get("mcp_registry", "")),
+                    validation_timeout_seconds=timeout,
+                )
+                if harness_enabled
+                else None
+            )
             tasks = TaskService(
                 root,
                 validation_timeout_seconds=timeout,
                 executor=executor,
+                workflow_factory=(None if harness is None else harness.workflow),
+                queue_workflow_factory=(
+                    None if harness is None else harness.queue_workflow
+                ),
+                archive_callback=(None if harness is None else harness.archive),
+                archive_retry_callback=(
+                    None if harness is None else harness.retry_archive
+                ),
             )
             queues = QueueService(
                 root,
                 validation_timeout_seconds=timeout,
                 executor=executor,
+                workflow_factory=(
+                    None if harness is None else harness.queue_workflow
+                ),
+            )
+            plans = (
+                None if harness is None else PlanService(harness, tasks, queues)
             )
             context = ProjectContext(
                 project_id=project_id,
                 name=str(item["name"]),
                 repo_root=root,
                 is_default=bool(item["is_default"]),
+                knowledge_actor_id=str(item.get("knowledge_actor_id", "")),
+                harness=harness,
                 task_service=tasks,
                 queue_service=queues,
+                plan_service=plans,
             )
             self._contexts[project_id] = context
             if context.is_default:

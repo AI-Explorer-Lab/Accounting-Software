@@ -25,6 +25,8 @@ const transactionType = ref<TransactionType | ''>('')
 const category = ref('')
 const startDate = ref('')
 const endDate = ref('')
+const minAmount = ref('')
+const maxAmount = ref('')
 const loading = ref(false)
 const deletingId = ref<number | null>(null)
 const errorMessage = ref('')
@@ -44,6 +46,8 @@ async function loadTransactions() {
       category: category.value.trim() || undefined,
       start_date: startDate.value || undefined,
       end_date: endDate.value || undefined,
+      min_amount: minAmount.value ? String(minAmount.value) : undefined,
+      max_amount: maxAmount.value ? String(maxAmount.value) : undefined,
     })
     if (!response.data) {
       throw new Error('查询结果为空')
@@ -63,6 +67,10 @@ async function applyFilters() {
     errorMessage.value = '开始日期不能晚于结束日期'
     return
   }
+  if (minAmount.value && maxAmount.value && Number(minAmount.value) > Number(maxAmount.value)) {
+    errorMessage.value = '最低金额不能大于最高金额'
+    return
+  }
   page.value = 1
   await loadTransactions()
 }
@@ -72,6 +80,8 @@ async function resetFilters() {
   category.value = ''
   startDate.value = ''
   endDate.value = ''
+  minAmount.value = ''
+  maxAmount.value = ''
   page.value = 1
   feedbackMessage.value = ''
   await loadTransactions()
@@ -147,6 +157,14 @@ watch(() => props.refreshKey, loadTransactions)
       <label>
         <span>结束日期</span>
         <input v-model="endDate" name="filter_end_date" type="date" />
+      </label>
+      <label>
+        <span>最低金额</span>
+        <input v-model="minAmount" name="filter_min_amount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00" />
+      </label>
+      <label>
+        <span>最高金额</span>
+        <input v-model="maxAmount" name="filter_max_amount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="0.00" />
       </label>
       <div class="filter-actions">
         <button type="submit" :disabled="loading">查询</button>

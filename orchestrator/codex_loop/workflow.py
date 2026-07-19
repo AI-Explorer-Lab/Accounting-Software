@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import json
 from pathlib import Path
 import subprocess
 from typing import Any
 
 from .audit import AuditRecorder, file_sha256
 from .codex_client import CodexClient, CodexRunResult
+from .context import (
+    ContextAssembler,
+    ContextSnapshot,
+    merge_context_snapshots,
+)
+from .evaluation import EvaluationCoordinator
 from .models import (
     InfrastructureError,
     PromptKind,
@@ -21,7 +28,14 @@ from .models import (
 )
 from .policy import ExecutionPolicy
 from .report import PromptRenderer, ReportBuilder
-from .state import ActiveRunError, QueueStore, StateStore, redact_sensitive_text
+from .state import (
+    ActiveRunError,
+    QueueStore,
+    StateStore,
+    has_only_plan_artifacts,
+    redact_sensitive_text,
+    _atomic_write_json,
+)
 from .validation_runner import ValidationRunner
 from .workspace import WorkspaceInfo, WorkspaceManager
 
@@ -49,6 +63,9 @@ class OrchestrationWorkflow:
         base_ref: str = "HEAD",
         inherited_diff_path: str | Path | None = None,
         inherited_diff_sha256: str = "",
+        context_assembler: ContextAssembler | None = None,
+        evaluation_coordinator: EvaluationCoordinator | None = None,
+        knowledge_actor_id: str = "",
     ) -> None:
         self.control_repo_root = Path(repo_root).expanduser().resolve()
         self.repo_root = self.control_repo_root  # compatibility alias
@@ -71,6 +88,9 @@ class OrchestrationWorkflow:
             else Path(inherited_diff_path).expanduser().resolve()
         )
         self.inherited_diff_sha256 = str(inherited_diff_sha256)
+        self.context_assembler = context_assembler
+        self.evaluation_coordinator = evaluation_coordinator
+        self.knowledge_actor_id = str(knowledge_actor_id)
         self.workspace_manager = WorkspaceManager(
             self.control_repo_root, base_ref=base_ref
         )
@@ -83,7 +103,9 @@ class OrchestrationWorkflow:
         audit: AuditRecorder | None = None
         try:
             self._assert_no_other_unfinished_task()
-            if self.store.run_dir(task.task_id).exists():
+            if self.store.run_dir(task.task_id).exists() and not has_only_plan_artifacts(
+                self.store.run_dir(task.task_id)
+            ):
                 raise InfrastructureError(
                     f"Task {task.task_id!r} already exists; use resume instead"
                 )
@@ -134,6 +156,24 @@ class OrchestrationWorkflow:
                 "run.created",
                 {"task_id": task.task_id, "rerun_of": task.rerun_of},
             )
+            plan_confirmation = self.store.run_dir(task.task_id) / "plan/confirmation.json"
+            if plan_confirmation.is_file():
+                confirmation = json.loads(
+                    plan_confirmation.read_text(encoding="utf-8")
+                )
+                audit.append(
+                    "plan.confirmed",
+                    {
+                        "plan_id": confirmation.get("plan_id"),
+                        "reviewer": confirmation.get("reviewer"),
+                        "confirmed_plan_sha256": confirmation.get(
+                            "confirmed_plan_sha256"
+                        ),
+                        "manual_edit_count": confirmation.get(
+                            "manual_edit_count", 0
+                        ),
+                    },
+                )
             audit.append(
                 "workspace.created",
                 {
@@ -142,6 +182,8 @@ class OrchestrationWorkflow:
                     "worktree": workspace.worktree_relative_path,
                 },
             )
+
+            self._assemble_generation_context(task, state, audit)
 
             policy = ExecutionPolicy(self.control_repo_root, workspace)
             self.store.save_permissions(task.task_id, policy.requested_snapshot())
@@ -158,7 +200,6 @@ class OrchestrationWorkflow:
                     "inherited_baseline": self.inherited_diff_path is not None,
                 },
             )
-
             validator = self._make_validator(workspace, policy, None)
             state.baseline_test_hashes = dict(validator.baseline)
             state.protected_test_paths = self._validator_protected_tests(
@@ -224,6 +265,7 @@ class OrchestrationWorkflow:
                 "workspace.verified",
                 {"branch": workspace.task_branch, "head": workspace.base_commit},
             )
+            self._assemble_generation_context(task, state, audit)
             if state.status is RunStatus.PAUSED:
                 state.reopen_after_pause()
                 self.store.clear_control(task_id)
@@ -308,6 +350,14 @@ class OrchestrationWorkflow:
                 if state.status.is_final:
                     return self._persist_final(task, state, audit)
                 continue
+            if state.phase in {
+                RunPhase.EVALUATION_PENDING,
+                RunPhase.EVALUATING,
+            }:
+                self._run_evaluation(task, state, audit)
+                if state.status.is_final:
+                    return self._persist_final(task, state, audit)
+                continue
             if state.phase is RunPhase.COMPLETED:
                 return self._persist_final(task, state, audit)
             raise InfrastructureError(f"Unsupported workflow phase: {state.phase}")
@@ -380,8 +430,26 @@ class OrchestrationWorkflow:
                 changed_files=audit.changed_paths(),
                 diff_sha256=audit.current_diff_sha256(),
             )
+        elif prompt_kind is PromptKind.EVALUATION_REPAIR:
+            if not state.pending_evaluation_summary:
+                raise InfrastructureError(
+                    "No independent evaluation failure is available to repair"
+                )
+            prompt = self.prompt_renderer.evaluation_repair_prompt(
+                task,
+                state,
+                state.pending_evaluation_summary,
+                changed_files=audit.changed_paths(),
+                diff_sha256=audit.current_diff_sha256(),
+            )
         else:
             raise InfrastructureError("No pending Codex prompt is recorded")
+
+        context = self._load_context(
+            self.store.run_dir(task.task_id) / "context" / "generation.json"
+        )
+        if context is not None:
+            prompt = f"{prompt}\n\n{context.prompt_block()}"
 
         turn_number = state.turn_count + 1
         state.last_diff_sha256 = audit.current_diff_sha256()
@@ -529,7 +597,11 @@ class OrchestrationWorkflow:
         if validation_round.infrastructure_error:
             raise InfrastructureError(validation_round.infrastructure_error)
         if validation_round.passed:
-            state.mark_success(self._safe_git_summary(Path(state.repo_root)))
+            if self.evaluation_coordinator is None:
+                state.mark_success(self._safe_git_summary(Path(state.repo_root)))
+            else:
+                state.phase = RunPhase.EVALUATION_PENDING
+                state.pending_prompt_kind = None
         elif state.cycle_failure_count >= MAX_VALIDATION_FAILURES:
             state.mark_manual_review(self._safe_git_summary(Path(state.repo_root)))
         else:
@@ -567,7 +639,11 @@ class OrchestrationWorkflow:
                 redacted=True,
             )
         if latest.passed and state.phase is RunPhase.VALIDATING:
-            state.mark_success(self._safe_git_summary(Path(state.repo_root)))
+            if self.evaluation_coordinator is None:
+                state.mark_success(self._safe_git_summary(Path(state.repo_root)))
+            else:
+                state.phase = RunPhase.EVALUATION_PENDING
+                state.pending_prompt_kind = None
             self.store.save_state(state)
         elif not latest.passed and state.cycle_failure_count >= MAX_VALIDATION_FAILURES:
             state.mark_manual_review(self._safe_git_summary(Path(state.repo_root)))
@@ -576,7 +652,8 @@ class OrchestrationWorkflow:
     @staticmethod
     def _ensure_retry_event(state: RunState, audit: AuditRecorder) -> None:
         if (
-            state.pending_prompt_kind is not PromptKind.REPAIR
+            state.pending_prompt_kind
+            not in {PromptKind.REPAIR, PromptKind.EVALUATION_REPAIR}
             or not state.rounds
             or state.cycle_failure_count >= MAX_VALIDATION_FAILURES
         ):
@@ -594,6 +671,150 @@ class OrchestrationWorkflow:
                 },
                 round_number=round_number,
             )
+
+    def _run_evaluation(
+        self,
+        task: TaskSpec,
+        state: RunState,
+        audit: AuditRecorder,
+    ) -> None:
+        if self.evaluation_coordinator is None:
+            state.mark_success(self._safe_git_summary(Path(state.repo_root)))
+            self.store.save_state(state)
+            return
+        if not state.rounds or not state.rounds[-1].passed:
+            raise InfrastructureError("evaluation requires a passed validation round")
+        round_number = state.rounds[-1].round_number
+        state.phase = RunPhase.EVALUATING
+        self.store.save_state(state)
+        aggregate_path = self.store.run_dir(task.task_id) / "evaluations" / "aggregate.json"
+        if aggregate_path.is_file():
+            aggregate = json.loads(aggregate_path.read_text(encoding="utf-8"))
+            if int(aggregate.get("validation_round", 0)) != round_number:
+                aggregate = {}
+        else:
+            aggregate = {}
+        if not aggregate:
+            context = self._assemble_evaluation_context(task, state, audit)
+            self.evaluation_coordinator.event_sink = lambda event_type, payload: audit.append(
+                event_type, payload, source="evaluator", round_number=round_number
+            )
+            aggregate = self.evaluation_coordinator.evaluate(
+                task=task,
+                context=context,
+                changed_files=audit.current_changed_files(),
+                diff_text=audit.current_diff_text(),
+                validation_round=round_number,
+                artifact_root=self.store.run_dir(task.task_id) / "evaluations",
+            )
+        if bool(aggregate.get("requires_repair")):
+            summary = json.dumps(
+                aggregate.get("blocking_findings", []),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            state.pending_evaluation_summary = summary
+            state.failure_count += 1
+            state.cycle_failure_count += 1
+            if state.cycle_turn_count >= MAX_CODEX_TURNS:
+                state.mark_manual_review(self._safe_git_summary(Path(state.repo_root)))
+            else:
+                state.phase = RunPhase.PROMPT_PENDING
+                state.pending_prompt_kind = PromptKind.EVALUATION_REPAIR
+                audit.append(
+                    "retry.scheduled",
+                    {
+                        "reason": "independent_evaluation",
+                        "failure_count": state.cycle_failure_count,
+                        "next_turn": state.turn_count + 1,
+                    },
+                    round_number=round_number,
+                )
+        else:
+            state.pending_evaluation_summary = ""
+            state.mark_success(self._safe_git_summary(Path(state.repo_root)))
+        self.store.save_state(state)
+
+    def _assemble_generation_context(
+        self,
+        task: TaskSpec,
+        state: RunState,
+        audit: AuditRecorder,
+    ) -> ContextSnapshot | None:
+        if self.context_assembler is None:
+            return None
+        self._bind_context_events(audit)
+        return self.context_assembler.assemble(
+            path=self.store.run_dir(task.task_id) / "context" / "generation.json",
+            stage="generation",
+            query=" ".join([task.requirement, *task.acceptance_criteria]),
+            actor=self.knowledge_actor_id,
+            include_memory=True,
+        )
+
+    def _assemble_evaluation_context(
+        self,
+        task: TaskSpec,
+        state: RunState,
+        audit: AuditRecorder,
+    ) -> ContextSnapshot:
+        if self.context_assembler is None:
+            raise InfrastructureError("evaluation context assembler is unavailable")
+        self._bind_context_events(audit)
+        context_root = self.store.run_dir(task.task_id) / "context"
+        changed_paths = audit.changed_paths()
+        query = " ".join([task.requirement, *task.acceptance_criteria])
+        specification = self.context_assembler.assemble(
+            path=context_root / "spec_evaluation.json",
+            stage="spec_evaluation",
+            query=query,
+            actor=self.knowledge_actor_id,
+            changed_paths=changed_paths,
+        )
+        architecture = self.context_assembler.assemble(
+            path=context_root / "architecture_evaluation.json",
+            stage="architecture_evaluation",
+            query=query,
+            actor=self.knowledge_actor_id,
+            changed_paths=changed_paths,
+        )
+        target = context_root / "evaluation.json"
+        if target.is_file():
+            merged = ContextSnapshot.from_dict(
+                json.loads(target.read_text(encoding="utf-8"))
+            )
+            merged.verify_hash()
+            return merged
+        merged = merge_context_snapshots("evaluation", specification, architecture)
+        _atomic_write_json(target, merged.to_dict())
+        audit.append(
+            "context.assembled",
+            {
+                "stage": "evaluation",
+                "snapshot_sha256": merged.snapshot_sha256,
+                "knowledge_count": len(merged.knowledge),
+                "skill_count": len(merged.skills),
+            },
+        )
+        return merged
+
+    def _bind_context_events(self, audit: AuditRecorder) -> None:
+        if self.context_assembler is None:
+            return
+        sink = lambda event_type, payload: audit.append(event_type, payload)
+        self.context_assembler.event_sink = sink
+        self.context_assembler.knowledge.client.event_sink = sink
+        self.context_assembler.skills.client.event_sink = sink
+
+    @staticmethod
+    def _load_context(path: Path) -> ContextSnapshot | None:
+        if not path.is_file():
+            return None
+        snapshot = ContextSnapshot.from_dict(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
+        snapshot.verify_hash()
+        return snapshot
 
     def _verify_permissions(
         self,

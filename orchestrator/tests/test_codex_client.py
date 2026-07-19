@@ -423,6 +423,39 @@ def test_stream_without_completed_turn_is_rejected(
         client.run("make the change")
 
 
+def test_failed_turn_preserves_redacted_sdk_error_detail(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    failed_turn = SimpleNamespace(
+        id="turn-failed",
+        status=FakeTurnStatus.failed,
+        error=SimpleNamespace(
+            message="Invalid output schema; token=super-secret",
+            additional_details=None,
+        ),
+        items=[],
+    )
+    stream = [
+        SimpleNamespace(
+            method="turn/completed",
+            payload=SimpleNamespace(turn=failed_turn),
+        )
+    ]
+    thread = FakeThread("thr-one", cwd=tmp_path, streams=[stream])
+    fake = FakeCodex(tmp_path, start_thread=thread)
+    install_fake_sdk(monkeypatch, fake)
+    client = CodexClient(tmp_path)
+    client.start_thread()
+
+    with pytest.raises(InfrastructureError) as caught:
+        client.run("make the change")
+
+    message = str(caught.value)
+    assert "Invalid output schema" in message
+    assert "super-secret" not in message
+    assert "[REDACTED]" in message
+
+
 def test_visible_response_comes_from_completed_stream_item_when_turn_items_unloaded(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

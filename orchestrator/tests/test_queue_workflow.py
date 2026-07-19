@@ -8,6 +8,7 @@ import pytest
 
 from orchestrator.codex_loop.audit import AuditRecorder
 from orchestrator.codex_loop.models import (
+    DeliveryStatus,
     InfrastructureError,
     PromptKind,
     QueueStatus,
@@ -368,6 +369,73 @@ def test_rejected_review_stops_the_queue(repository: Path) -> None:
     assert rejected.subtasks[0].status is QueueTaskStatus.REJECTED
     assert rejected.subtasks[1].status is QueueTaskStatus.PENDING
     assert workflow.run_current("queue-review").status is QueueStatus.REJECTED
+
+
+def test_approved_queue_delivery_retries_commit_then_archives_before_advancing(
+    repository: Path,
+) -> None:
+    _workflow, queue_store, store, task_id, diff_sha = prepare_real_review(
+        repository
+    )
+
+    class FlakyDelivery:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def deliver(self, selected_task_id: str, **_kwargs: object) -> dict[str, str]:
+            self.calls += 1
+            run_state = store.load_state(selected_task_id)
+            if self.calls == 1:
+                run_state.delivery_status = DeliveryStatus.FAILED
+                store.save_state(run_state)
+                raise InfrastructureError("injected commit interruption")
+            run_state.delivery_status = DeliveryStatus.COMMITTED
+            store.save_state(run_state)
+            return {"status": "committed", "commit_sha": "a" * 40}
+
+    delivery = FlakyDelivery()
+    archive_calls: list[str] = []
+
+    def archive(selected_task_id: str, *, store: StateStore) -> dict[str, str]:
+        archive_calls.append(selected_task_id)
+        run_state = store.load_state(selected_task_id)
+        assert run_state.delivery_status is DeliveryStatus.COMMITTED
+        run_state.delivery_status = DeliveryStatus.ARCHIVED
+        store.save_state(run_state)
+        return {"status": "completed"}
+
+    recovering = QueueWorkflow(
+        repository,
+        queue_store=queue_store,
+        workflow_factory=workflow_factory,
+        delivery_factory=lambda _store: delivery,  # type: ignore[arg-type]
+        archive_callback=archive,
+    )
+
+    with pytest.raises(InfrastructureError, match="injected commit interruption"):
+        recovering.record_review(
+            "queue-review",
+            task_id,
+            decision="approved",
+            reviewer="Reviewer",
+            comment="Approved.",
+            reviewed_diff_sha256=diff_sha,
+        )
+
+    failed = queue_store.load_state("queue-review")
+    assert failed.status is QueueStatus.INFRASTRUCTURE_ERROR
+    assert failed.task(task_id).review_status is ReviewStatus.APPROVED
+    assert archive_calls == []
+
+    resumed = recovering.resume("queue-review")
+
+    assert delivery.calls == 2
+    assert archive_calls == [task_id]
+    assert resumed.status is QueueStatus.WAITING_REVIEW
+    assert resumed.current_task_id == "queue-review-task-02"
+    assert resumed.task(task_id).status is QueueTaskStatus.COMPLETED
+    assert resumed.task(task_id).delivery_status is DeliveryStatus.ARCHIVED
+    assert resumed.cumulative_diff_sha256
 
 
 def test_infrastructure_error_resumes_only_the_current_subtask(

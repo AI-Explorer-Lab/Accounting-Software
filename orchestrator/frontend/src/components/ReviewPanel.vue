@@ -5,11 +5,14 @@ import type { ReviewDecision, TaskData } from "../types/task";
 
 const props = defineProps<{ task: TaskData; submitting: boolean }>();
 const emit = defineEmits<{
-  review: [payload: { decision: ReviewDecision; reviewer: string; comment: string }];
+  review: [payload: { decision: ReviewDecision; reviewer: string; comment: string; commit_subject: string }];
+  retryCommit: [];
+  retryArchive: [];
 }>();
 
 const reviewer = ref("");
 const comment = ref("");
+const commitSubject = ref("");
 const formError = ref("");
 const pendingDecision = ref<ReviewDecision | null>(null);
 const confirmButton = ref<HTMLButtonElement | null>(null);
@@ -19,12 +22,38 @@ const decisionLabels: Record<ReviewDecision, string> = {
   rejected: "驳回任务",
 };
 const existingReview = computed(() => props.task.review as Record<string, unknown> | null);
+const deliveryLabels: Record<TaskData["delivery_status"], string> = {
+  not_ready: "尚未进入交付",
+  commit_pending: "等待创建 commit",
+  committing: "正在创建 commit",
+  committed: "commit 已创建",
+  archive_pending: "知识归档待完成",
+  archived: "已归档",
+  failed: "交付需要重试",
+  unavailable: "历史信息缺失",
+};
+const archiveOutbox = computed(() => {
+  const value = props.task.archive.outbox;
+  return typeof value === "object" && value !== null
+    ? value as Record<string, unknown>
+    : {};
+});
+const canRetryArchive = computed(() =>
+  props.task.delivery_status === "failed" &&
+  props.task.commit.status === "committed" &&
+  archiveOutbox.value.status !== "completed",
+);
+const canRetryCommit = computed(() =>
+  props.task.delivery_status === "failed" && props.task.commit.status !== "committed",
+);
 const impactCopy = computed(() => {
   if (!pendingDecision.value) return "";
   if (!props.task.queue_id) {
     return pendingDecision.value === "changes_requested"
       ? "任务会从当前 Thread 继续修改，原审核记录保持不变。"
-      : "结论会绑定当前 Diff 指纹并写入不可变审核历史。";
+      : pendingDecision.value === "approved"
+        ? "批准会绑定当前 Diff 和 commit subject，并在任务分支创建一次 commit；不会 merge 或 push。"
+        : "结论会绑定当前 Diff 指纹并写入不可变审核历史。";
   }
   const labels: Record<ReviewDecision, string> = {
     approved: "当前子任务将完成，队列会继续执行下一个尚未开始的子任务。",
@@ -39,6 +68,10 @@ function prepare(decision: ReviewDecision): void {
     formError.value = "请填写审核人。";
     return;
   }
+  if (decision === "approved" && !commitSubject.value.trim()) {
+    formError.value = "批准前请填写 commit subject。";
+    return;
+  }
   formError.value = "";
   pendingDecision.value = decision;
 }
@@ -49,6 +82,7 @@ function confirm(): void {
     decision: pendingDecision.value,
     reviewer: reviewer.value.trim(),
     comment: comment.value.trim(),
+    commit_subject: pendingDecision.value === "approved" ? commitSubject.value.trim() : "",
   });
   pendingDecision.value = null;
 }
@@ -62,6 +96,17 @@ watch(pendingDecision, async (value) => {
   await nextTick();
   confirmButton.value?.focus();
 });
+
+watch(
+  () => props.task.task_id,
+  () => {
+    const existing = props.task.review?.commit_subject;
+    commitSubject.value = typeof existing === "string" && existing.trim()
+      ? existing
+      : props.task.requirement.split(/\r?\n/, 1)[0].trim().slice(0, 200);
+  },
+  { immediate: true },
+);
 </script>
 
 <template>
@@ -76,16 +121,34 @@ watch(pendingDecision, async (value) => {
       <p>Diff 中有 {{ task.diff_redaction_count }} 处疑似敏感信息已被替换，请先移除后重新运行。</p>
     </div>
 
+    <dl class="review-result delivery-state-card">
+      <div><dt>交付状态</dt><dd>{{ deliveryLabels[task.delivery_status] }}</dd></div>
+      <div v-if="task.commit.commit_sha"><dt>Commit</dt><dd><code>{{ task.commit.commit_sha }}</code></dd></div>
+      <div v-if="task.commit.subject"><dt>Subject</dt><dd>{{ task.commit.subject }}</dd></div>
+      <div v-if="task.archive.summary"><dt>知识归档</dt><dd>{{ archiveOutbox.status === 'completed' ? '已完成' : '本地摘要已保存' }}</dd></div>
+    </dl>
+    <div v-if="task.delivery_status === 'failed'" class="callout danger-callout delivery-retry">
+      <strong>自动交付未完成</strong>
+      <p>{{ task.last_error_summary || task.commit.error || "可以在不重新生成代码的情况下重试对应检查点。" }}</p>
+      <button v-if="canRetryCommit" class="secondary-button" type="button" :disabled="submitting" @click="emit('retryCommit')">重试 commit</button>
+      <button v-if="canRetryArchive" class="secondary-button" type="button" :disabled="submitting" @click="emit('retryArchive')">重试知识归档</button>
+    </div>
+
     <dl v-if="existingReview && task.review_status !== 'pending'" class="review-result">
       <div><dt>结论</dt><dd>{{ display(existingReview.decision) }}</dd></div>
       <div><dt>审核人</dt><dd>{{ display(existingReview.reviewer) }}</dd></div>
       <div><dt>说明</dt><dd>{{ display(existingReview.comment) }}</dd></div>
+      <div v-if="existingReview.commit_subject"><dt>Commit subject</dt><dd>{{ display(existingReview.commit_subject) }}</dd></div>
       <div><dt>对应 Diff</dt><dd><code>{{ display(existingReview.reviewed_diff_sha256) }}</code></dd></div>
     </dl>
 
     <form v-else class="review-form" @submit.prevent>
       <label>审核人（本地声明身份）<input v-model="reviewer" data-test="reviewer" :disabled="submitting" /></label>
       <label>审核说明<textarea v-model="comment" data-test="review-comment" rows="4" :disabled="submitting" placeholder="记录判断依据，方便之后回看。" /></label>
+      <label>Commit subject
+        <input v-model="commitSubject" data-test="commit-subject" maxlength="200" :disabled="submitting" />
+        <small>仅在批准时使用；会与当前 Diff 一起绑定。系统不会 merge 或 push。</small>
+      </label>
       <p v-if="formError" class="form-error" role="alert">{{ formError }}</p>
       <div class="review-actions">
         <button class="primary-button" type="button" data-test="approve" :disabled="submitting || task.diff_redaction_count > 0" @click="prepare('approved')">批准</button>

@@ -55,3 +55,17 @@ export function submitTaskReview(
     { method: "POST", body: JSON.stringify(payload) },
   );
 }
+
+export function retryTaskCommit(taskId: string): Promise<TaskData> {
+  return apiRequest<TaskData>(
+    `/api/tasks/${encodeURIComponent(taskId)}/delivery/retry`,
+    { method: "POST" },
+  );
+}
+
+export function retryTaskArchive(taskId: string): Promise<TaskData> {
+  return apiRequest<TaskData>(
+    `/api/tasks/${encodeURIComponent(taskId)}/archive/retry`,
+    { method: "POST" },
+  );
+}
