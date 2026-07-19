@@ -152,6 +152,119 @@ def test_delivery_creates_one_review_bound_commit_and_is_idempotent(
     assert store.load_state("delivery-single").delivery_status is DeliveryStatus.COMMITTED
 
 
+def test_delivery_accepts_exact_file_blocks_when_new_file_order_differs(
+    repository: Path,
+) -> None:
+    store, worktree, reviewed_sha = prepare_approved_run(
+        repository,
+        task_id="delivery-mixed-order",
+        changes={
+            "two.txt": "approved two\n",
+            "aaa-new.txt": "approved new\n",
+        },
+    )
+    saved_diff = (
+        store.run_dir("delivery-mixed-order") / "changes" / "final.diff"
+    ).read_bytes()
+
+    record = GitDeliveryService(repository, store=store).deliver(
+        "delivery-mixed-order"
+    )
+
+    committed_diff = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "show",
+            "--format=",
+            "--binary",
+            "--find-renames",
+            "HEAD",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    assert hashlib.sha256(saved_diff).hexdigest() == reviewed_sha
+    assert saved_diff != committed_diff
+    assert git(worktree, "show", "HEAD:aaa-new.txt") == "approved new"
+    assert git(worktree, "show", "HEAD:two.txt") == "approved two"
+    assert record["staged_diff_sha256"] == hashlib.sha256(
+        committed_diff
+    ).hexdigest()
+
+
+def test_failed_delivery_recovers_exact_pre_staged_content_with_legacy_order(
+    repository: Path,
+) -> None:
+    store, worktree, _sha = prepare_approved_run(
+        repository,
+        task_id="delivery-failed-staged-order",
+        changes={
+            "two.txt": "approved two\n",
+            "aaa-new.txt": "approved new\n",
+        },
+    )
+    saved_diff = (
+        store.run_dir("delivery-failed-staged-order") / "changes" / "final.diff"
+    ).read_bytes()
+    git(worktree, "add", "--all", "--", "aaa-new.txt", "two.txt")
+    staged_diff = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(worktree),
+            "diff",
+            "--cached",
+            "--binary",
+            "--find-renames",
+            "HEAD",
+            "--",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    state = store.load_state("delivery-failed-staged-order")
+    state.delivery_status = DeliveryStatus.FAILED
+    store.save_state(state)
+
+    assert saved_diff != staged_diff
+    recovered = GitDeliveryService(repository, store=store).deliver(
+        "delivery-failed-staged-order"
+    )
+
+    assert recovered["status"] == "committed"
+    assert recovered["staged_diff_sha256"] == hashlib.sha256(
+        staged_diff
+    ).hexdigest()
+    assert git(worktree, "status", "--porcelain") == ""
+
+
+def test_delivery_rejects_different_pre_staged_file_content(
+    repository: Path,
+) -> None:
+    store, worktree, _sha = prepare_approved_run(
+        repository,
+        task_id="delivery-staged-tamper",
+        changes={"one.txt": "approved one\n"},
+    )
+    (worktree / "one.txt").write_text("tampered one\n", encoding="utf-8")
+    git(worktree, "add", "one.txt")
+    (worktree / "one.txt").write_text("approved one\n", encoding="utf-8")
+
+    with pytest.raises(DeliveryError, match="unexpected pre-staged content"):
+        GitDeliveryService(repository, store=store).deliver(
+            "delivery-staged-tamper"
+        )
+
+    assert git(worktree, "rev-parse", "HEAD") == git(
+        repository, "rev-parse", "main"
+    )
+    assert store.load_state(
+        "delivery-staged-tamper"
+    ).delivery_status is DeliveryStatus.FAILED
+
+
 def test_delivery_rejects_post_review_tampering_without_creating_commit(
     repository: Path,
 ) -> None:

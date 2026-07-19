@@ -80,7 +80,6 @@ class GitDeliveryService:
                 run_dir, changes, task.queue_id is not None
             )
             expected_bytes = expected_diff_path.read_bytes()
-            expected_staged_sha = hashlib.sha256(expected_bytes).hexdigest()
             reviewed_files = self._reviewed_files(changes)
             review_sha = _json_sha(selected_review.to_dict())
             branch = self._git(worktree, "rev-parse", "--abbrev-ref", "HEAD")
@@ -96,7 +95,6 @@ class GitDeliveryService:
                     worktree=worktree,
                     audit=audit,
                     expected_bytes=expected_bytes,
-                    expected_staged_sha=expected_staged_sha,
                     expected_cumulative_sha=expected_cumulative_sha,
                     review=selected_review,
                     review_sha=review_sha,
@@ -111,6 +109,7 @@ class GitDeliveryService:
                 changes,
                 reviewed_files,
                 expected_cumulative_sha,
+                expected_bytes,
             )
             staged_before = self._git_bytes(
                 worktree,
@@ -121,12 +120,10 @@ class GitDeliveryService:
                 state.base_commit,
                 "--",
             )
-            staged_before_crash = (
-                state.delivery_status is DeliveryStatus.COMMITTING
-                and staged_before == expected_bytes
-                and bool(staged_before)
+            staged_before_matches = bool(staged_before) and _git_diffs_equivalent(
+                staged_before, expected_bytes
             )
-            if not staged_before_crash:
+            if not staged_before_matches:
                 self._verify_index_baseline(worktree, state)
             state.delivery_status = DeliveryStatus.COMMITTING
             self.store.save_state(state)
@@ -140,7 +137,7 @@ class GitDeliveryService:
                     },
                     source="orchestrator",
                 )
-            if not staged_before_crash:
+            if not staged_before_matches:
                 self._stage_reviewed_files(worktree, reviewed_files)
             staged = self._git_bytes(
                 worktree,
@@ -153,10 +150,11 @@ class GitDeliveryService:
             )
             if not staged:
                 raise DeliveryError("approved change produced an empty staged diff")
-            if staged != expected_bytes:
+            if not _git_diffs_equivalent(staged, expected_bytes):
                 raise DeliveryError(
                     "staged cumulative diff does not match the approved content"
                 )
+            staged_sha = hashlib.sha256(staged).hexdigest()
             tree = self._git(worktree, "write-tree")
             author = self._identity(worktree)
             intent = {
@@ -171,7 +169,7 @@ class GitDeliveryService:
                 "review_sha256": review_sha,
                 "reviewed_diff_sha256": selected_review.reviewed_diff_sha256,
                 "cumulative_diff_sha256": expected_cumulative_sha,
-                "staged_diff_sha256": expected_staged_sha,
+                "staged_diff_sha256": staged_sha,
                 "reviewed_files": reviewed_files,
                 "author": author,
                 "started_at": utc_now_iso(),
@@ -195,7 +193,6 @@ class GitDeliveryService:
         worktree: Path,
         audit: AuditRecorder,
         expected_bytes: bytes,
-        expected_staged_sha: str,
         expected_cumulative_sha: str,
         review: ReviewRecord,
         review_sha: str,
@@ -210,7 +207,6 @@ class GitDeliveryService:
             ("review_sha256", review_sha),
             ("reviewed_diff_sha256", review.reviewed_diff_sha256),
             ("cumulative_diff_sha256", expected_cumulative_sha),
-            ("staged_diff_sha256", expected_staged_sha),
         ):
             if str(existing.get(key, "")) != str(expected):
                 raise DeliveryError(f"commit recovery intent changed: {key}")
@@ -235,8 +231,12 @@ class GitDeliveryService:
             state.base_commit,
             "--",
         )
-        if staged != expected_bytes:
+        if not _git_diffs_equivalent(staged, expected_bytes):
             raise DeliveryError("staged tree changed during commit recovery")
+        if hashlib.sha256(staged).hexdigest() != str(
+            existing.get("staged_diff_sha256", "")
+        ):
+            raise DeliveryError("staged diff changed during commit recovery")
         tree = self._git(worktree, "write-tree")
         if tree != str(existing.get("expected_tree", "")):
             raise DeliveryError("staged tree does not match commit recovery intent")
@@ -360,17 +360,29 @@ class GitDeliveryService:
         changes: Mapping[str, Any],
         reviewed_files: list[str],
         expected_cumulative_sha: str,
+        expected_bytes: bytes,
     ) -> None:
         final = dict(changes.get("final_diff", {}))
         saved = str(final.get("raw_sha256", ""))
         if saved != review.reviewed_diff_sha256:
             raise DeliveryError("review is not bound to the saved final diff")
-        if audit.current_diff_sha256() != review.reviewed_diff_sha256:
+        saved_path = audit.run_dir / str(final.get("path", ""))
+        if not saved_path.is_file():
+            raise DeliveryError("approved final diff file is missing")
+        saved_bytes = saved_path.read_bytes()
+        if hashlib.sha256(saved_bytes).hexdigest() != saved:
+            raise DeliveryError("approved final diff file hash changed")
+        if not _git_diffs_equivalent(audit.current_diff_bytes(), saved_bytes):
             raise DeliveryError("task diff changed after human review")
         if audit.changed_paths() != reviewed_files:
             raise DeliveryError("task contains files outside the reviewed file set")
-        if audit.queue_task and audit.current_cumulative_diff_sha256() != expected_cumulative_sha:
-            raise DeliveryError("queue cumulative diff changed after review")
+        if audit.queue_task:
+            if hashlib.sha256(expected_bytes).hexdigest() != expected_cumulative_sha:
+                raise DeliveryError("queue cumulative diff file hash changed")
+            if not _git_diffs_equivalent(
+                audit.current_cumulative_diff_bytes(), expected_bytes
+            ):
+                raise DeliveryError("queue cumulative diff changed after review")
 
     def _verify_index_baseline(self, worktree: Path, state: Any) -> None:
         staged = self._git_bytes(
@@ -561,6 +573,44 @@ def _json_sha(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
+
+
+def _git_diffs_equivalent(left: bytes, right: bytes) -> bool:
+    """Compare exact per-file Git diff blocks while ignoring block order."""
+
+    try:
+        return _git_diff_blocks(left) == _git_diff_blocks(right)
+    except ValueError:
+        return False
+
+
+def _git_diff_blocks(raw: bytes) -> dict[bytes, bytes]:
+    if not raw:
+        return {}
+    prefix = b"diff --git "
+    blocks: dict[bytes, bytes] = {}
+    current: list[bytes] = []
+    for line in raw.splitlines(keepends=True):
+        if line.startswith(prefix):
+            if current:
+                _store_git_diff_block(blocks, current)
+            current = [line]
+            continue
+        if not current:
+            raise ValueError("Git diff has content before its first file header")
+        current.append(line)
+    if current:
+        _store_git_diff_block(blocks, current)
+    return blocks
+
+
+def _store_git_diff_block(
+    blocks: dict[bytes, bytes], lines: list[bytes]
+) -> None:
+    header = lines[0].rstrip(b"\r\n")
+    if header in blocks:
+        raise ValueError("Git diff contains duplicate file headers")
+    blocks[header] = b"".join(lines)
 
 
 __all__ = ["DeliveryError", "GitDeliveryService"]
