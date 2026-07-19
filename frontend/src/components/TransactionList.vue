@@ -103,16 +103,20 @@ async function changePage(nextPage: number) {
   await loadTransactions()
 }
 
-async function removeTransaction(transactionId: number) {
+async function removeTransaction(transaction: TransactionData) {
   if (deletingId.value !== null) {
     return
   }
 
-  deletingId.value = transactionId
+  if (!window.confirm(`确认删除分类为“${transaction.category}”的交易吗？`)) {
+    return
+  }
+
+  deletingId.value = transaction.id
   errorMessage.value = ''
   feedbackMessage.value = ''
   try {
-    await deleteTransaction(transactionId)
+    await deleteTransaction(transaction.id)
     feedbackMessage.value = '交易已删除'
     if (transactions.value.length === 1 && page.value > 1) {
       page.value -= 1
@@ -219,7 +223,7 @@ watch(() => props.refreshKey, loadTransactions)
                 type="button"
                 :disabled="deletingId !== null"
                 :aria-label="`删除 ${transaction.category} 交易`"
-                @click="removeTransaction(transaction.id)"
+                @click="removeTransaction(transaction)"
               >
                 {{ deletingId === transaction.id ? '删除中…' : '删除' }}
               </button>
