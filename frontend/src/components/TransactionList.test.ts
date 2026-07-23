@@ -112,6 +112,39 @@ describe('TransactionList', () => {
     )
   })
 
+  it('counts every enabled filter condition', async () => {
+    const wrapper = mount(TransactionList, { props: { refreshKey: 0 } })
+    await flushPromises()
+
+    expect(wrapper.find('.active-filter-count').exists()).toBe(false)
+
+    await wrapper.get('select[name="filter_transaction_type"]').setValue('expense')
+    await wrapper.get('input[name="filter_category"]').setValue('餐饮')
+    await wrapper.get('input[name="filter_start_date"]').setValue('2026-07-01')
+    expect(wrapper.get('.active-filter-count').text()).toBe('已启用 3 个筛选条件')
+
+    await wrapper.get('input[name="filter_end_date"]').setValue('2026-07-31')
+    await wrapper.get('input[name="filter_min_amount"]').setValue('10.00')
+    await wrapper.get('input[name="filter_max_amount"]').setValue('20.00')
+    expect(wrapper.get('.active-filter-count').text()).toBe('已启用 6 个筛选条件')
+  })
+
+  it('does not count a blank category and hides the count after reset', async () => {
+    const wrapper = mount(TransactionList, { props: { refreshKey: 0 } })
+    await flushPromises()
+
+    await wrapper.get('input[name="filter_category"]').setValue('   ')
+    expect(wrapper.find('.active-filter-count').exists()).toBe(false)
+
+    await wrapper.get('input[name="filter_min_amount"]').setValue('10.00')
+    expect(wrapper.get('.active-filter-count').text()).toBe('已启用 1 个筛选条件')
+
+    await wrapper.get('button.secondary-button').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.active-filter-count').exists()).toBe(false)
+  })
+
   it('blocks an invalid amount range without requesting', async () => {
     const wrapper = mount(TransactionList, { props: { refreshKey: 0 } })
     await flushPromises()

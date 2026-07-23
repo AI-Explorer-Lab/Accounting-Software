@@ -37,6 +37,14 @@ const amountFormatter = new Intl.NumberFormat('zh-CN', {
 })
 
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
+const activeFilterCount = computed(() => [
+  transactionType.value,
+  category.value.trim(),
+  startDate.value,
+  endDate.value,
+  minAmount.value,
+  maxAmount.value,
+].filter(Boolean).length)
 
 function formatAmount(amount: string) {
   return `¥${amountFormatter.format(Number(amount))}`
@@ -184,6 +192,9 @@ watch(() => props.refreshKey, loadTransactions)
           重置
         </button>
       </div>
+      <p v-if="activeFilterCount" class="active-filter-count" role="status">
+        已启用 {{ activeFilterCount }} 个筛选条件
+      </p>
     </form>
 
     <div class="list-feedback" aria-live="polite">
